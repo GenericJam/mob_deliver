@@ -8,9 +8,9 @@
 Every mobile OS makes a distinction between:
 
 1. **Code that ships with the app binary** — reviewed by the store, updated only by store submission. Native code (ObjC / Swift / Kotlin / Zig / C++ / Rust NIFs), the OTP runtime (ERTS, stdlib), and whatever Elixir bytecode was compiled into the binary at build time.
-2. **Content the app fetches at runtime** — user data, remote assets, and (permissively, for interpreted / bytecode-hosting runtimes) new bytecode to run within the shipped runtime. React Native's CodePush and Expo Updates exploit this loophole for JS; the App Store rules (5.2.2, updated ~2020) explicitly allow it for "code within a runtime shipped with your app."
+2. **Content the app fetches at runtime** — user data, remote assets, and (permissively, for interpreted / bytecode-hosting runtimes) new bytecode to run within the shipped runtime. React Native's CodePush and Expo Updates rely on this for JS: Apple's Developer Program License Agreement §3.3.1(B) permits downloaded interpreted code within limits, and Google Play exempts code running in a VM or interpreter (exact text and caveats — including App Review Guideline 2.5.2 — in [`guides/store_review.md`](../guides/store_review.md)).
 
-BEAM bytecode fits category 2 perfectly. Mob apps are BEAMs running on a phone with hot-code-load as a first-class primitive (`Code.load_binary/3`). The dev workflow already exercises this: `mix mob.deploy` pushes changed `.beam` files to a running device and hot-loads them module-by-module. Prod OTA is literally that same primitive with a signature + a fetch trigger.
+BEAM bytecode fits category 2 perfectly. Mob apps are BEAMs running on a phone with hot-code-load as a first-class primitive (`:code.load_binary/3`). The dev workflow already exercises this: `mix mob.deploy` pushes changed `.beam` files to a running device and hot-loads them module-by-module. Prod OTA is literally that same primitive with a signature + a fetch trigger.
 
 There is also a second, more novel possibility: since screens are already discrete `Mob.Screen` modules, an app can be structured as a **shell + JIT-fetched screens** — an install-time shell (boot, auth, navigation, plugin infra) plus a fleet of leaf screens fetched the first time the user navigates to them. This is the "your mobile app can be a website" pattern. No other mobile stack ships this as a first-class primitive; mob's per-module hot-load makes it a natural extension of the runtime.
 
@@ -33,8 +33,8 @@ The on-device store maps a **SHA-256** to a `.beam` blob. Every deliverable `.be
 
 | Consumer | Trigger | Fetch shape |
 |---|---|---|
-| **Update poll** | Boot / schedule / silent push (via `mob_wake`) / user "check for updates" | Fetch full manifest; diff against local; fetch each `beam/:sha` for changed modules; hot-load one-by-one; on `on_start`-touching change, request restart. |
-| **JIT navigation** | `Mob.Router.push_screen/1` cache miss | Fetch the one module (via manifest lookup); verify signature; `Code.load_binary/3`; mount. |
+| **Update poll** | Boot / schedule / silent push (via `mob_wake`) / `MobDeliver.check/0` | Fetch full manifest; prefetch new versions of modules the device already runs (and their delivered callees); install on probation. Loaded modules switch at the next launch — see "Client-side rollback". |
+| **JIT navigation** | cache miss on navigation (`Mob.Socket.push_screen/3` → the router's `:before_navigate` hook) | Fetch the one module (via manifest lookup); verify signature; `:code.load_binary/3`; mount. |
 
 Both write to the same content-addressed store. A screen fetched by JIT is now available for the update poll to hash-check next cycle; a proactively-updated screen is a JIT cache hit thereafter.
 
@@ -162,7 +162,7 @@ Each of these is an **additive** change to the wire format — either a new fiel
 
 ### Store review defense
 
-Both stores allow OTA of interpreted / bytecode-hosted code within a runtime shipped with the app (App Store 5.2.2, Google Play equivalents). Some reviewers still flag it. Standard review-note text to include with every submission of a mob_deliver-using app:
+Downloaded interpreted code is allowed on iOS within the limits of the Apple Developer Program License Agreement §3.3.1(B), while App Review Guideline 2.5.2 is what reviewers cite against code that "introduces or changes features" (an earlier draft of this ADR cited 5.2.2, which is about intellectual property). Google Play's Device and Network Abuse policy exempts code running in a VM or interpreter with only indirect access to platform APIs. The quoted rules, the analysis, and the current reviewer-note text are in [`guides/store_review.md`](../guides/store_review.md); the original draft of the note was:
 
 > "This app downloads signed Erlang bytecode that runs within the BEAM VM shipped with the app binary. No native code is downloaded or executed. Bytecode delivery is scoped to feature screens; the app's core (native, BEAM runtime, and store-reviewed screens) is baked into the binary at review time. Content is served over HTTPS from our first-party servers and cryptographically signed with a key embedded in the reviewed app."
 

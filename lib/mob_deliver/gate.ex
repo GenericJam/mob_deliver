@@ -38,7 +38,7 @@ defmodule MobDeliver.Gate do
 
   @doc """
   Options: `:name`, `:store` (whose root holds the gate file), `:verify`
-  (default `MobDeliver.Boot.verifier/0`). The persisted gate is reloaded
+  (default: this build's trusted key, app, and channel). The persisted gate is reloaded
   and re-verified on every start, so a restart never opens it.
   """
   @spec start_link(keyword()) :: GenServer.on_start()

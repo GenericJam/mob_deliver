@@ -43,8 +43,8 @@ defmodule MobDeliver do
   * Content-addressed on-device BEAM store.
   * Manifest fetch + Ed25519 signature verification against a trusted key
     baked into the shipped app.
-  * Per-module hot-load via `Code.load_binary/3` (no restart when nothing
-    on the `on_start` path changed).
+  * Delivered modules load at launch, before any app code runs; screens
+    not on the device yet load on first navigation (`:code.load_binary/3`).
   * Slot-based watchdog + rollback for updates that DO touch boot: if a
     fresh install crashes before the app reaches its first idle, next boot
     detects it and swaps back to the last-known-good tree.
@@ -97,6 +97,9 @@ defmodule MobDeliver do
          do: {:ok, manifest}
   end
 
+  @typedoc "What `check/0` did; see its docs."
+  @type check_outcome :: :current | :installed | :rejected | :deferred | :below_min_version
+
   @doc """
   Checks for an update now (the poller also runs this at boot, every
   `:poll_interval`, and on a silent push).
@@ -117,7 +120,7 @@ defmodule MobDeliver do
 
   Concurrent calls share one check.
   """
-  @spec check() :: {:ok, MobDeliver.Installer.outcome()} | {:error, term()}
+  @spec check() :: {:ok, check_outcome()} | {:error, term()}
   def check,
     do:
       MobDeliver.SingleFlight.run(MobDeliver.SingleFlight, :check, &MobDeliver.Installer.check/0)

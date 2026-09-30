@@ -8,7 +8,7 @@ defmodule MobDeliver.Store do
       blobs/<sha256>   .beam bytes, named by their SHA-256
       state            the active and previous signed manifest bodies
 
-  Files are written with `MobDeliver.Disk.atomic_write/2` (tmp → fsync →
+  Files are written durably (tmp → fsync →
   rename → fsync dir), so a path holds its old or its complete new bytes
   after any crash, and an acknowledged write survives power loss. Blobs
   are re-hashed on every read; a mismatch reports `:corrupt` and the next
@@ -41,7 +41,7 @@ defmodule MobDeliver.Store do
 
   @empty_slots %{active: nil, previous: nil}
 
-  @doc "Starts a store. Options: `:name` (default `#{inspect(__MODULE__)}`), `:root` (default `MobDeliver.Config.root/0`)."
+  @doc "Starts a store. Options: `:name` (default `#{inspect(__MODULE__)}`), `:root` (default `<MOB_DATA_DIR>/mob_deliver`)."
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) do
     name = Keyword.get(opts, :name, __MODULE__)
@@ -155,7 +155,7 @@ defmodule MobDeliver.Store do
   interrupted writes. Deletes nothing if either slot can't be parsed.
 
   Boot-only: blob writes don't go through this process, so it must run
-  when nothing can be fetching — `MobDeliver.Boot` calls it before update
+  when nothing can be fetching — the plugin's boot calls it before update
   checks start and before any app code can call `resolve/1`.
   """
   @spec gc(server()) :: {:ok, non_neg_integer()} | {:error, term()}

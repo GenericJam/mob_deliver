@@ -26,7 +26,7 @@ binary. mob_deliver adds a **content-addressed on-device store** that both:
 
 Both consume the same primitive: fetch a `.beam` by its SHA-256, verify
 against a signed manifest whose trust key was baked into the app at build
-time, hot-load via `Code.load_binary/3`.
+time, load via `:code.load_binary/3`.
 
 ## Which plugin do I actually want?
 
@@ -46,8 +46,8 @@ and `mob_deliver` to actually pull + install; they compose naturally.
 - Content-addressed on-device BEAM store.
 - Manifest fetch + Ed25519 signature verification against a trusted key
   baked into the shipped app.
-- Per-module hot-load via `Code.load_binary/3` (no app restart when
-  nothing on the `on_start` path changed).
+- Delivered modules load at launch, before any app code runs; screens not
+  on the device yet load on first navigation (`:code.load_binary/3`).
 - Slot-based watchdog + rollback for updates that DO touch boot.
 - `MobDeliver.resolve/1` — cache-miss fetch, callable from a router.
 - Forced-update window: manifest carries `min_app_version` + a
@@ -140,6 +140,13 @@ Update checks run at boot, every `:poll_interval`, and on a silent push
 whose data carries `"mob_wake_id": "mob_deliver_check"` (with `mob_wake`
 installed). `MobDeliver.check/0` runs one now.
 
+## Guides
+
+- [Operator manual](guides/operator_manual.md) — signing key, app config,
+  hosting, publishing, the update window, what devices do, troubleshooting.
+- [Store review](guides/store_review.md) — the App Store / Google Play rules
+  on downloaded code, where mob_deliver sits, and reviewer-note text.
+
 ## Development
 
 ```bash
@@ -159,7 +166,7 @@ mix test
 
 Issues are tracked with [beads](https://github.com/gastownhall/beads):
 `bd ready` lists unblocked work, `bd list --parent mob_deliver-c67` the v1 epic.
-Read [`AGENTS.md`](AGENTS.md) and the scope ADR before changing anything
+Read `AGENTS.md` (repo root) and the scope ADR before changing anything
 wire-format-adjacent.
 
 ## License

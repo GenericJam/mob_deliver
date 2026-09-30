@@ -48,7 +48,11 @@ defmodule MobDeliver.MixProject do
       main: "readme",
       extras: [
         "README.md",
-        "CHANGELOG.md"
+        "guides/operator_manual.md",
+        "guides/store_review.md",
+        "decisions/2026-09-19-scope-and-wire-format.md",
+        "CHANGELOG.md",
+        "LICENSE"
       ]
     ]
   end
