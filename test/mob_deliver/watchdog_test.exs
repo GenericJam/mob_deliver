@@ -60,9 +60,9 @@ defmodule MobDeliver.WatchdogTest do
     Watchdog.rejected?(app.watchdog, Store.manifest_id(b), manifest)
   end
 
-  defp install(ctx, app, label) do
-    {:ok, :installed} = try_install(ctx, app, label)
-    Store.manifest_id(body(ctx, label))
+  defp install(ctx, app, label, extra \\ %{}) do
+    {:ok, :installed} = try_install(ctx, app, label, extra)
+    Store.manifest_id(body(ctx, label, extra))
   end
 
   defp stable_install(ctx, label) do
@@ -72,6 +72,29 @@ defmodule MobDeliver.WatchdogTest do
   end
 
   describe "probation" do
+    test "a probation launch whose first screen is the update screen proves nothing: the next launch is on probation again",
+         ctx do
+      good = stable_install(ctx, "good")
+      update = install(ctx, launch(ctx), "update")
+
+      gated = launch(ctx)
+      assert gated.outcome == {:ok, :armed}
+      assert Watchdog.mark_idle_unproven(gated.watchdog) == :ok
+      assert Watchdog.first_idle?(gated.watchdog)
+      # Still unproven: no second install meanwhile.
+      assert try_install(ctx, gated, "next") == {:ok, :deferred}
+
+      # Not a failed launch either: no rollback.
+      real = launch(ctx)
+      assert real.outcome == {:ok, :armed}
+      assert Store.active_id(real.store) == update
+
+      # A launch that dies before its real first screen still rolls back.
+      rolled = launch(ctx)
+      assert rolled.outcome == {:ok, :rolled_back}
+      assert Store.active_id(rolled.store) == good
+    end
+
     test "an update whose first boot dies before first idle is rolled back on the next boot",
          ctx do
       good = stable_install(ctx, "good")
@@ -210,7 +233,6 @@ defmodule MobDeliver.WatchdogTest do
          ctx do
       good = stable_install(ctx, "good")
       bad = install(ctx, launch(ctx), "bad")
-      {:ok, manifest} = ctx.verify.(body(ctx, "bad"))
 
       # The rejection is durable, the slot switch back to `good` never happened.
       File.write!(
@@ -219,7 +241,7 @@ defmodule MobDeliver.WatchdogTest do
           armed: nil,
           boots: 0,
           rejected: [],
-          rejected_code: [{Manifest.code_id(manifest), "1.0"}],
+          rejections: [%{suspects: %{"MyApp.Home" => sha("bad")}, app_version: "1.0", id: bad}],
           notice: nil
         })
       )
@@ -231,6 +253,60 @@ defmodule MobDeliver.WatchdogTest do
       rolled = launch(ctx, app_version: "1.1")
       assert rolled.outcome == {:ok, :rolled_back}
       assert Store.active_id(rolled.store) == good
+    end
+
+    test "a later manifest that still ships the rolled-back version of a module is refused, whatever else changed",
+         ctx do
+      stable_install(ctx, [{"MyApp.Home", "home 1"}, {"MyApp.Greeting", "greeting 1"}])
+      install(ctx, launch(ctx), [{"MyApp.Home", "home 1"}, {"MyApp.Greeting", "broken"}])
+      launch(ctx)
+      app = launch(ctx)
+      assert app.outcome == {:ok, :rolled_back}
+
+      # Only the screen changed; the broken Greeting is still in it.
+      assert try_install(ctx, app, [{"MyApp.Home", "home 2"}, {"MyApp.Greeting", "broken"}]) ==
+               {:ok, :rejected}
+
+      # Adding modules doesn't help either.
+      assert try_install(ctx, app, [
+               {"MyApp.Home", "home 2"},
+               {"MyApp.Greeting", "broken"},
+               {"MyApp.New", "new"}
+             ]) == {:ok, :rejected}
+
+      # Changing the broken module is the fix.
+      assert try_install(ctx, app, [{"MyApp.Home", "home 2"}, {"MyApp.Greeting", "greeting 2"}]) ==
+               {:ok, :installed}
+    end
+
+    test "a manifest whose modules all changed together is refused only while it ships all of them",
+         ctx do
+      stable_install(ctx, [{"MyApp.A", "a1"}, {"MyApp.B", "b1"}])
+      install(ctx, launch(ctx), [{"MyApp.A", "a2"}, {"MyApp.B", "b2"}])
+      launch(ctx)
+      app = launch(ctx)
+      assert app.outcome == {:ok, :rolled_back}
+
+      assert try_install(ctx, app, [{"MyApp.A", "a2"}, {"MyApp.B", "b2"}, {"MyApp.C", "c"}]) ==
+               {:ok, :rejected}
+
+      # Either changed module alone might be the broken one: not refused.
+      assert try_install(ctx, app, [{"MyApp.A", "a2"}, {"MyApp.B", "b3"}]) == {:ok, :installed}
+    end
+
+    test "a rolled-back update with the same modules as the proven one doesn't take the proven one down",
+         ctx do
+      good = stable_install(ctx, "good")
+      same_code = %{"issued_at" => "2026-09-29T00:00:00Z"}
+      install(ctx, launch(ctx), "good", same_code)
+      launch(ctx)
+      rolled = launch(ctx)
+
+      assert rolled.outcome == {:ok, :rolled_back}
+      assert Store.active_id(rolled.store) == good
+      assert launch(ctx).outcome == {:ok, :clean}
+      # The exact manifest isn't reinstalled.
+      assert try_install(ctx, rolled, "good", same_code) == {:ok, :rejected}
     end
 
     test "rejections recorded before code ids refuse the exact manifest; its modules re-published get one more probation",

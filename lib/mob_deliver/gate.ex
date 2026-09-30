@@ -41,9 +41,11 @@ defmodule MobDeliver.Gate do
   @doc """
   Options: `:name`, `:store` (whose root holds the gate file), `:verify`
   (default: this build's trusted key, app, and channel), `:app_version`
-  (for the unparseable-version warning; default
-  `MobDeliver.Config.app_version/0`). The persisted gate is reloaded and
-  re-verified on every start, so a restart never opens it.
+  (this binary's version; default `MobDeliver.Config.app_version/0`),
+  `:on_change` (called with the new `t:status/0` when a recorded manifest
+  moves this app into or out of `:required`; default: bring navigation in
+  line, see `MobDeliver.GateNavigation`). The persisted gate is reloaded
+  and re-verified on every start, so a restart never opens it.
   """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) do
@@ -160,7 +162,8 @@ defmodule MobDeliver.Gate do
     s = %{
       table: table(name),
       store: Keyword.get(opts, :store, Store),
-      app_version: Keyword.get_lazy(opts, :app_version, &Config.app_version/0)
+      app_version: Keyword.get_lazy(opts, :app_version, &Config.app_version/0),
+      on_change: Keyword.get(opts, :on_change, &MobDeliver.GateNavigation.run(status: &1))
     }
 
     load(s, Keyword.get_lazy(opts, :verify, &MobDeliver.Boot.verifier/0))
@@ -188,21 +191,42 @@ defmodule MobDeliver.Gate do
 
   @impl true
   def handle_call({:record, body, manifest}, _from, s) do
-    newer? =
+    current =
       case :ets.lookup(s.table, :latest) do
-        [{:latest, current}] -> DateTime.compare(manifest.issued_at, current.issued_at) != :lt
-        [] -> true
+        [{:latest, current}] -> current
+        [] -> nil
       end
 
-    if newer? do
+    if current == nil or DateTime.compare(manifest.issued_at, current.issued_at) != :lt do
       # A verified floor applies at once, persisted or not.
       :ets.insert(s.table, {:latest, manifest})
       warn_uncomparable(manifest, s.app_version)
+      report_change(s, current, manifest)
       {:reply, Disk.atomic_write(path(s), body), s}
     else
       {:reply, :ok, s}
     end
   end
+
+  # Into or out of :required (recommended counts as open: nothing blocks).
+  defp report_change(s, current, manifest) do
+    now = DateTime.utc_now()
+    before = if current, do: evaluate(current, s.app_version, now), else: :ok
+    after_record = evaluate(manifest, s.app_version, now)
+
+    if required?(before) != required?(after_record) do
+      try do
+        s.on_change.(after_record)
+      catch
+        kind, reason ->
+          Logger.warning(
+            "mob_deliver: update-gate change handler failed (#{Exception.format_banner(kind, reason)})"
+          )
+      end
+    end
+  end
+
+  defp required?(status), do: match?({:required, _}, status)
 
   defp warn_uncomparable(%Manifest{min_app_version: nil}, _app_version), do: :ok
 

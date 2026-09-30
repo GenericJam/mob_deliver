@@ -348,6 +348,20 @@ defmodule MobDeliver.ResolverTest do
       assert manifest_fetches() == 1
     end
 
+    test "a miss answered from the last refresh says so, with when the next one is allowed",
+         ctx do
+      opts = Keyword.put(publish(ctx, [], %{}), :refresh_interval, 60_000)
+      first = :"Elixir.MobDeliverJit#{ctx.id}.Late"
+      second = :"Elixir.MobDeliverJit#{ctx.id}.Later"
+
+      fresh = ExUnit.CaptureLog.capture_log(fn -> Resolver.resolve(first, opts) end)
+      assert fresh =~ "#{inspect(first)} isn't in the server's newest manifest"
+
+      cached = ExUnit.CaptureLog.capture_log(fn -> Resolver.resolve(second, opts) end)
+      assert cached =~ "#{inspect(second)} isn't in the manifest fetched "
+      assert cached =~ "s ago; next refresh allowed in "
+    end
+
     test "before the root screen's first frame nothing is fetched for it: :not_found", ctx do
       {mod, bin} = beam("defmodule MobDeliverJit#{ctx.id}.Early do def hi, do: :early end")
       publish_latest(ctx, [{mod, bin}])
@@ -402,7 +416,13 @@ defmodule MobDeliver.ResolverTest do
           armed: nil,
           boots: 0,
           rejected: [],
-          rejected_code: [{Manifest.code_id(manifest), "2.0.0"}],
+          rejections: [
+            %{
+              suspects: manifest.modules,
+              app_version: "2.0.0",
+              id: Store.manifest_id(rolled_back)
+            }
+          ],
           notice: nil
         })
       )

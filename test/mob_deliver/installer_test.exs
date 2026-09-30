@@ -151,7 +151,9 @@ defmodule MobDeliver.InstallerTest do
         armed: nil,
         boots: 0,
         rejected: [],
-        rejected_code: [{Manifest.code_id(manifest), "2.0.0"}],
+        rejections: [
+          %{suspects: manifest.modules, app_version: "2.0.0", id: Store.manifest_id(rolled_back)}
+        ],
         notice: nil
       })
     )
@@ -239,6 +241,44 @@ defmodule MobDeliver.InstallerTest do
 
     assert Installer.check(opts(ctx, update, blobs)) == {:ok, :installed}
     assert Store.has_blob?(ctx.store, sha(helper_bin))
+  end
+
+  test "delivered modules that code running on the device calls are prefetched; ones it only names aren't",
+       ctx do
+    n = ctx.n
+    called = :"Elixir.MobDeliverInstall#{n}.Greeting"
+    named = :"Elixir.MobDeliverInstall#{n}.LaterScreen"
+
+    # A bundled screen, loaded from a .beam file as on a device: it calls
+    # Greeting and only mentions LaterScreen (e.g. push_screen(socket, it)).
+    {:module, _, bundled_bin, _} =
+      Module.create(
+        :"Elixir.MobDeliverInstall#{n}.HomeScreen",
+        quote do
+          def text, do: unquote(called).text()
+          def next, do: unquote(named)
+        end,
+        Macro.Env.location(__ENV__)
+      )
+
+    dir = Path.join(ctx.root, "bundled")
+    File.mkdir_p!(dir)
+    base = Path.join(dir, "Elixir.MobDeliverInstall#{n}.HomeScreen")
+    File.write!(base <> ".beam", bundled_bin)
+    :code.purge(:"Elixir.MobDeliverInstall#{n}.HomeScreen")
+    {:module, _} = :code.load_abs(String.to_charlist(base))
+
+    update =
+      body(ctx, [
+        {Manifest.module_key(called), "greeting"},
+        {Manifest.module_key(named), "later screen"}
+      ])
+
+    blobs = %{sha("greeting") => "greeting", sha("later screen") => "later screen"}
+
+    assert Installer.check(opts(ctx, update, blobs)) == {:ok, :installed}
+    assert Store.has_blob?(ctx.store, sha("greeting"))
+    refute Store.has_blob?(ctx.store, sha("later screen"))
   end
 
   test "keys of modules this device has never heard of don't create atoms", ctx do

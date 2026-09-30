@@ -97,6 +97,27 @@ first frame) only installed content runs, so a screen the startup flow
 needs must be in an installed manifest (it is after the next update
 check).
 
+Bundled code (`lib/`) can call a delivered module (`mobile/`) directly, but
+the compiler can't see `mobile/`, so it warns that the module is undefined
+on every compile and publish. Silence it per module where you call it:
+
+```elixir
+defmodule MyApp.HomeScreen do
+  use Mob.Screen
+  # Delivered from mobile/ by mob_deliver; not compiled into lib/.
+  @compile {:no_warn_undefined, MyApp.Greeting}
+
+  defp greeting, do: MyApp.Greeting.text()
+end
+```
+
+Such a call is exactly what runs on the boot path, so a broken delivered
+module is caught by probation (section 6). mob_deliver loads it at launch
+once an update check has installed a manifest with it; before that (the
+first launch, or no network yet) the call raises `UndefinedFunctionError`,
+so guard it (`function_exported?/3` after `Code.ensure_loaded/1`) if the
+app must run without it.
+
 ## 3. Delivery endpoint
 
 Mount the plug in a Phoenix app (outside the `:browser` pipeline):
@@ -165,6 +186,12 @@ mix mob_deliver.publish … --min-app-version 1.5.0 \
 
 The gate follows the newest manifest a device has verified and survives
 restarts and offline launches; an older signed manifest can't lift it.
+When a newly verified manifest makes the gate required, the app switches
+to the update screen at once; when a newer one lifts it (publish without
+`--min-app-version`, or with a lower one), an app showing the update
+screen goes back to its root screen at once, also right after a cold boot
+that started on the update screen. That needs the app to boot through
+`MobDeliver.root_screen/2`, which is how it knows the root.
 
 ## 6. What devices do
 
@@ -207,33 +234,44 @@ restarts and offline launches; an older signed manifest can't lift it.
     and FCM deprioritizes high-priority messages that don't lead to a
     visible notification. The foreground checks are what's guaranteed.
 * **What they fetch:** the manifest, plus new versions of modules the device
-  already runs and the delivered modules those call. Modules nothing on the
-  device uses are fetched the first time they're navigated to.
+  already runs, delivered modules that code running in the app *calls*
+  (e.g. a bundled screen calling a delivered helper), and the delivered
+  modules those call, so the next launch has them offline. Modules nothing
+  on the device calls (including screens that are only navigated to) are
+  fetched the first time they're navigated to.
 * **When updates apply:** at the next launch. A running session keeps its
   loaded code; modules not loaded yet resolve to the new manifest at once.
 * **Probation:** the first launch of a new manifest is on probation until the
   root screen paints (first idle). If that launch dies first, the next launch
-  rolls back to the previous manifest, never installs that content again,
-  and `MobDeliver.take_rollback_notice/0` returns a one-time notice to show
-  the user. Only one unproven update is installed at a time. While one is
-  pending, further checks are deferred with exponential backoff (5s,
-  doubling, capped at `:poll_interval`).
+  rolls back to the previous manifest, refuses what that update introduced
+  (below), and `MobDeliver.take_rollback_notice/0` returns a one-time
+  notice to show the user. Only one unproven update is installed at a time.
+  While one is pending, further checks are deferred with exponential
+  backoff (5s, doubling, capped at `:poll_interval`). A launch that boots
+  into the forced-update screen doesn't count either way: the update stays
+  on probation until a launch shows the app's real root screen.
 * **Any death before first idle counts.** The device can't tell a crash in
   your delivered code from an OS kill, a user swiping the app away, or a
   crash in bundled code or a native library during that launch. All of
   them roll the update back and reject its content on that device. The
   window is short (launch to the root screen's first paint), but it
   happens.
-* **Fixing a rolled-back release:** publish *changed* content. Devices
-  that rolled it back refuse the same modules (the module → SHA set) on
-  the same app version, whatever the `issued_at` or update window, so
-  re-running the publish on the same source does nothing for them. Any
-  change that changes a compiled `.beam` (not a comment-only edit) is new
-  content; so is adding or removing a module. After a store update of the
-  app, devices give previously rejected content — even the unchanged
-  manifest — a fresh probation. Devices that rejected content under
-  mob_deliver 0.1.0 refuse that exact manifest on every app version; the
-  same modules re-published get one more probation launch there.
+* **Fixing a rolled-back release: change the broken module.** When an
+  update X is rolled back, the device records the module versions X
+  introduced (the modules whose compiled `.beam` differs from the release
+  it replaced). On that app version it refuses every later manifest that
+  still contains *all* of those versions, whatever its `issued_at` or
+  update window and whatever else changed. So re-running the publish on the
+  same source, or shipping a release that only changes some other screen,
+  does nothing for those devices (the log names the refused modules). A
+  release that changes at least one of X's new modules — normally the one
+  that crashed — is installed and gets its own probation. A source change
+  counts only if it changes the compiled `.beam` (not a comment-only
+  edit). After a store update of the app, devices give previously rejected
+  content, even the unchanged manifest, a fresh probation. Devices that
+  rejected content under mob_deliver 0.1.0 refuse that exact manifest on
+  every app version; the same modules re-published get one more probation
+  launch there.
 
 ## 7. Troubleshooting
 
@@ -250,7 +288,10 @@ nothing changed:
 | `{:error, {:transport, _}}` | network/TLS — on Android check the `req_options` CA certs (section 2); in the background, see section 6 |
 | `{:ok, :below_min_version}` | this binary is older than the manifest's floor |
 | `{:ok, :deferred}` | an installed update hasn't finished its probation launch yet |
-| `{:ok, :rejected}` | these modules were rolled back on this device before |
+| `{:ok, :rejected}` | the manifest still ships every module version a rolled-back update introduced on this device (log: `refusing … any manifest that still has all of …`); change one of them |
 
 A navigation that does nothing logs `mob_deliver: navigation to X refused,
-it couldn't be delivered (reason)` (the same reasons as above).
+it couldn't be delivered (reason)` (the same reasons as above). A module
+the server didn't have yet logs `mob_deliver: X isn't in the manifest
+fetched Ns ago; next refresh allowed in Ms` (see `:refresh_interval`)
+before the router's own "unknown navigation destination" error.

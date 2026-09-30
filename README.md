@@ -170,7 +170,14 @@ is logged. To show a spinner or a "couldn't load" message instead, call
 docs); never call it inline in a screen callback, which would freeze the
 screen for the whole download. Past the forced-update deadline, any
 navigation replaces the whole stack with the update screen, so back
-can't return to a user screen.
+can't return to a user screen; when a check finds the gate newly
+required or lifted, the app switches to the update screen or back to its
+root at once.
+
+Bundled code calling a delivered (`mobile/`) module compiles with an
+"undefined module" warning; silence it with
+`@compile {:no_warn_undefined, MyApp.Greeting}` in the calling module
+(details in the [operator manual](guides/operator_manual.md#2-app-configuration)).
 
 Update checks run at boot, every `:poll_interval` **while the app is in
 the foreground** (Android blocks a backgrounded app's network, so timed

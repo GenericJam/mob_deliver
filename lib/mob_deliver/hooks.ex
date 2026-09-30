@@ -41,7 +41,7 @@ defmodule MobDeliver.Hooks do
         :ok
 
       {:error, :update_required} ->
-        {:reset, MobDeliver.Config.get(:update_screen) || MobDeliver.UpdateRequiredScreen}
+        {:reset, MobDeliver.GateNavigation.update_screen()}
 
       {:error, :not_found} ->
         :ok
@@ -56,6 +56,26 @@ defmodule MobDeliver.Hooks do
   end
 
   @doc false
-  @spec first_render() :: :ok | {:error, term()}
-  def first_render, do: MobDeliver.mark_stable()
+  # The root screen's first frame. If it was the update screen (the app
+  # booted under a required gate), none of the booted update's screens ran:
+  # that's first idle without proof. Then bring navigation in line with the
+  # gate, which may have changed before the router existed.
+  @spec first_render(keyword()) :: :ok | {:error, term()}
+  def first_render(opts \\ []) do
+    watchdog = Keyword.get(opts, :watchdog, MobDeliver.Watchdog)
+    root = Keyword.get_lazy(opts, :root, &MobDeliver.GateNavigation.root/0)
+    reconcile = Keyword.get(opts, :reconcile, &MobDeliver.GateNavigation.run/0)
+
+    result =
+      case root do
+        %{booted: booted, requested: requested} when booted != requested ->
+          MobDeliver.Watchdog.mark_idle_unproven(watchdog)
+
+        _ ->
+          MobDeliver.Watchdog.mark_stable(watchdog)
+      end
+
+    reconcile.()
+    result
+  end
 end

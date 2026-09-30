@@ -79,10 +79,13 @@ defmodule MobDeliver.Installer do
   end
 
   # New versions of modules the device already runs (delivered ones in the
-  # active manifest, or bundled ones on the code path) plus every delivered
-  # module they call: boot loads them all, so a delivered-only helper a boot
-  # module calls (even from @on_load) must be local too. Modules nothing on
-  # the device uses stay JIT (resolve/1) so first launches stay small.
+  # active manifest, or bundled ones on the code path), delivered modules
+  # that code loaded on the device calls (a bundled screen calling a
+  # delivered helper), plus every delivered module those call: boot loads
+  # them all, so the next launch — a probation launch — doesn't have to
+  # download them while its first screen mounts (even offline). Modules
+  # nothing on the device calls stay JIT (resolve/1) so first launches stay
+  # small; a module merely named (push_screen(socket, SomeScreen)) is JIT.
   defp prefetch(%Manifest{modules: modules}, opts) do
     current =
       case Store.active(opts[:store]) do
@@ -90,10 +93,46 @@ defmodule MobDeliver.Installer do
         nil -> %{}
       end
 
-    modules
-    |> Enum.filter(fn {key, sha} -> Map.get(current, key) != sha and on_device?(key, current) end)
-    |> Enum.map(&elem(&1, 0))
+    changed =
+      for {key, sha} <- modules, Map.get(current, key) != sha, on_device?(key, current), do: key
+
+    (changed ++ called_by_loaded_code(modules, current))
     |> fetch_closure(MapSet.new(), modules, opts)
+  end
+
+  # Delivered keys not on the device that some loaded module imports (calls
+  # remotely). Loading a module creates the atoms it imports, so a key
+  # without an atom can't be imported by anything loaded — that filter
+  # keeps the scan of loaded modules' import chunks to the rare install
+  # that has candidates.
+  defp called_by_loaded_code(modules, current) do
+    candidates =
+      for {key, _sha} <- modules,
+          not Map.has_key?(current, key),
+          {:ok, module} <- [Manifest.existing_module(key)],
+          :code.which(module) == :non_existing,
+          into: MapSet.new(),
+          do: module
+
+    if MapSet.size(candidates) == 0 do
+      []
+    else
+      :code.all_loaded()
+      |> Enum.flat_map(fn
+        {_module, file} when is_list(file) and file != [] -> imports_from_file(file)
+        _preloaded_or_in_memory -> []
+      end)
+      |> Enum.filter(&MapSet.member?(candidates, &1))
+      |> Enum.uniq()
+      |> Enum.map(&Manifest.module_key/1)
+    end
+  end
+
+  defp imports_from_file(file) do
+    case :beam_lib.chunks(file, [:imports]) do
+      {:ok, {_module, [imports: imports]}} -> Enum.map(imports, &elem(&1, 0))
+      {:error, :beam_lib, _} -> []
+    end
   end
 
   defp fetch_closure([], _seen, _modules, _opts), do: :ok

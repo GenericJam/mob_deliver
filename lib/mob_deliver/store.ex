@@ -141,6 +141,14 @@ defmodule MobDeliver.Store do
     do: GenServer.call(server, {:rollback, expected_active, verify})
 
   @doc """
+  The previous manifest (the rollback target), re-verified with `verify`,
+  or `nil` when there is none or it no longer verifies — then a rollback
+  lands on bundled code.
+  """
+  @spec previous(server(), verify_fun()) :: Manifest.t() | nil
+  def previous(server, verify), do: GenServer.call(server, {:previous, verify})
+
+  @doc """
   Runs this session on bundled code without touching the persisted slots:
   `active/1` becomes `nil`, so nothing delivered is looked up or loaded,
   and installs conflict until the next boot. For boots whose probation
@@ -211,6 +219,16 @@ defmodule MobDeliver.Store do
             {:reply, error, s}
         end
     end
+  end
+
+  def handle_call({:previous, verify}, _from, %{slots: slots} = s) do
+    reply =
+      case slots.previous && check(slots.previous, verify) do
+        {:ok, {_id, manifest}} -> manifest
+        _ -> nil
+      end
+
+    {:reply, reply, s}
   end
 
   def handle_call(:gc, _from, %{table: table, slots: slots} = s) do

@@ -19,15 +19,26 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
   `on_start`. Without them the plugin failed its boot and
   `root_screen/2` crashed the app's `on_start`. On older mob the plugin now
   logs why and the app runs its bundled code.
-- A rolled-back update is rejected by its **code on this app version**,
-  not by its signed payload: `{module → SHA map, native app version}`
-  (`Manifest.code_id/1`). Re-publishing the same modules with a new
-  `issued_at` or update window is refused (`{:ok, :rejected}`); after a
-  store update of the app the same content, even the unchanged manifest,
-  gets a fresh probation, and a manifest whose rollback didn't finish
-  before the store update boots on probation. Rejections recorded by 0.1.0
-  keep refusing their exact manifest on every version; the same modules
-  re-published get one more probation launch there.
+- A rolled-back update poisons **what it introduced**, not its signed
+  payload: the device records, for its native app version, the module →
+  SHA pairs the update introduced relative to the release it replaced, and
+  refuses (`{:ok, :rejected}`) any later manifest that still ships all of
+  them, whatever its `issued_at`, update window or other changes. So
+  re-publishing the same source, or a release that changes only an
+  unrelated screen, no longer crashes devices again; changing the broken
+  module gets through. After a store update of the app the same content,
+  even the unchanged manifest, gets a fresh probation, and a manifest
+  whose rollback didn't finish before the store update boots on probation.
+  Rejections recorded by 0.1.0 keep refusing their exact manifest on every
+  version; the same modules re-published get one more probation launch
+  there.
+- A launch that boots into the forced-update screen no longer ends the
+  booted update's probation (none of its screens ran) and doesn't count as
+  a failed launch: the update stays on probation until the app's real root
+  renders.
+- Installs also prefetch the delivered modules that code loaded on the
+  device calls (e.g. a bundled screen calling a delivered helper), so the
+  probation launch doesn't download them while its first screen mounts.
 - Timed update checks run only while the app is in the foreground
   (Android blocks a backgrounded app's network). The plugin's new
   `on_background`/`on_resume` lifecycle hooks pause them (cancelling the
@@ -39,6 +50,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 - Past the forced-update deadline, navigation **replaces the whole stack**
   with the update screen (`{:reset, screen}` hook verdict, mob 0.9.6), so
   back no longer returns to a user screen.
+- A gate change found mid-session applies at once: a newly required gate
+  switches to the update screen without waiting for the next navigation,
+  and a lifted gate returns an app showing the update screen to the root
+  it asked `root_screen/2` for, also right after a cold boot that started
+  on the update screen.
 - `MobDeliver.UpdateRequiredScreen` uses theme colour tokens (readable in
   dark and light themes) and, without `:store_url`, tells users to update
   from their store instead of showing no action at all.
@@ -72,7 +88,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
   next launch", a rollback says whether it boots the previous manifest or
   bundled code, and a stored blob that can't be read at boot is logged.
 - A navigation refused because its screen couldn't be delivered logs a
-  `mob_deliver:` warning.
+  `mob_deliver:` warning; a module missing from the last refreshed
+  manifest logs how old that manifest is and when the next refresh is
+  allowed.
+- A rollback of an update whose modules match the release it replaced no
+  longer takes that (proven) release down with it.
 
 ### Docs
 - `resolve/1` blocks its caller for the whole fetch: documented, with a
@@ -80,9 +100,12 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 - Operator manual: config is evaluated on the build machine; Android TLS;
   background network limits and the exact silent-push shape (data-only,
   high-priority FCM via `mob_push`); any death before first idle rejects
-  the content, and how to recover (republish changed content).
-- ADR: the JIT-miss refresh design, code-keyed rejection, why deaths
-  before first idle aren't told apart, and `Mob.Device.app_version/0`.
+  the content; fixing a rolled-back release means changing the broken
+  module; `@compile {:no_warn_undefined, Mod}` for bundled code calling a
+  delivered module (also in the README).
+- ADR: the JIT-miss refresh design, suspect-set rejection, why deaths
+  before first idle aren't told apart, gate changes mid-session, and
+  `Mob.Device.app_version/0`.
 
 ## [0.1.0] - 2026-09-30
 

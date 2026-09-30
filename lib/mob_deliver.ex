@@ -252,15 +252,25 @@ defmodule MobDeliver do
         {:ok, _} = Mob.Screen.start_root(MobDeliver.root_screen(MyApp.HomeScreen))
       end
 
+  It remembers `screen`: when a newer manifest lifts the gate mid-session,
+  navigation is reset from the update screen to `screen`; when one makes
+  the gate required, from whatever is showing to the update screen. A
+  launch that boots into the update screen doesn't end an update's
+  probation (none of its screens ran).
+
   Never raises: if the gate can't be read (mob_deliver not started), it
   logs why and returns `screen`.
   """
   @spec root_screen(module(), module()) :: module()
   def root_screen(screen, update_screen \\ MobDeliver.UpdateRequiredScreen) do
-    case update_status() do
-      {:required, _} -> update_screen
-      _ -> screen
-    end
+    booted =
+      case update_status() do
+        {:required, _} -> update_screen
+        _ -> screen
+      end
+
+    MobDeliver.GateNavigation.put_root(screen, booted, update_screen)
+    booted
   catch
     kind, reason ->
       Logger.error(

@@ -119,6 +119,40 @@ defmodule MobDeliver.GateTest do
     assert {:required, _} = status(ctx, "1.0", @late)
   end
 
+  test "a recorded manifest that changes this app's verdict is reported at once; one that doesn't isn't",
+       ctx do
+    test_pid = self()
+    watched = :"#{ctx.gate}_watched"
+
+    start_supervised!(
+      {Gate,
+       name: watched,
+       store: ctx.store,
+       verify: ctx.verify,
+       app_version: "1.0",
+       on_change: fn status -> send(test_pid, {:changed, status}) end},
+      id: watched
+    )
+
+    past = "2026-01-01T00:00:00Z"
+
+    record_in = fn issued_at, fields ->
+      {body, manifest} = published(ctx, Map.put(fields, "issued_at", issued_at))
+      :ok = Gate.record(watched, body, manifest)
+    end
+
+    record_in.("2026-09-20T00:00:00Z", %{"min_app_version" => "2.0", "force_update_after" => past})
+
+    assert_receive {:changed, {:required, _}}
+
+    record_in.("2026-09-21T00:00:00Z", %{"min_app_version" => "3.0", "force_update_after" => past})
+
+    refute_receive {:changed, _}, 50
+
+    record_in.("2026-09-22T00:00:00Z", %{"min_app_version" => nil})
+    assert_receive {:changed, :ok}
+  end
+
   test "installable?/2 follows the floor" do
     manifest = %Manifest{
       app: "a",

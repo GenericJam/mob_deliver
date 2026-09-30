@@ -27,16 +27,19 @@ defmodule MobDeliver.Refresh do
   end
 
   @doc """
-  The latest manifest from the server, or the cached result of a fetch
-  less than `opts[:refresh_interval]` ms old. Uses `opts[:refresh]`,
-  `:single_flight`, `:gate` and `:client_opts`.
+  The latest manifest from the server — `{:fresh, result}` — or the result
+  of a fetch less than `opts[:refresh_interval]` ms old —
+  `{:cached, age_ms, result}`. Uses `opts[:refresh]`, `:single_flight`,
+  `:gate` and `:client_opts`. `{:error, _}` if the shared fetch itself
+  failed to run (`MobDeliver.SingleFlight`).
   """
-  @spec latest(keyword()) :: result()
+  @spec latest(keyword()) ::
+          {:fresh, result()} | {:cached, non_neg_integer(), result()} | {:error, term()}
   def latest(opts) do
     with :stale <- cached(opts) do
       # Re-checked inside the flight: one may have finished just before.
       SingleFlight.run(opts[:single_flight], :refresh, fn ->
-        with :stale <- cached(opts), do: fetch(opts)
+        with :stale <- cached(opts), do: {:fresh, fetch(opts)}
       end)
     end
   end
@@ -44,9 +47,8 @@ defmodule MobDeliver.Refresh do
   defp cached(opts) do
     case :ets.lookup(table(opts[:refresh]), :last) do
       [{:last, at, result}] ->
-        if System.monotonic_time(:millisecond) - at < opts[:refresh_interval],
-          do: result,
-          else: :stale
+        age = System.monotonic_time(:millisecond) - at
+        if age < opts[:refresh_interval], do: {:cached, age, result}, else: :stale
 
       [] ->
         :stale

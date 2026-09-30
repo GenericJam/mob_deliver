@@ -98,24 +98,71 @@ defmodule MobDeliver.Resolver do
             :bundled
 
           true ->
-            refreshed(key, opts)
+            refreshed(module, key, opts)
         end
     end
   end
 
-  defp refreshed(key, opts) do
-    with {:ok, id, %Manifest{modules: modules} = latest} <- Refresh.latest(opts),
+  defp refreshed(module, key, opts) do
+    {result, age} =
+      case Refresh.latest(opts) do
+        {:fresh, result} -> {result, nil}
+        {:cached, age, result} -> {result, age}
+        {:error, _} = error -> {error, nil}
+      end
+
+    with {:ok, id, %Manifest{modules: modules} = latest} <- explained(result, module, age, opts),
          # The refreshed manifest may have moved this app past its deadline.
          :ok <- open_gate(opts) do
       cond do
         # An install may have landed while we fetched.
-        match?({:ok, _}, delivering(key, opts)) -> delivering(key, opts)
-        not Map.has_key?(modules, key) -> :bundled
-        runnable?(id, latest, opts) -> {:ok, modules}
-        true -> :bundled
+        match?({:ok, _}, delivering(key, opts)) ->
+          delivering(key, opts)
+
+        not Map.has_key?(modules, key) ->
+          log_absent(module, age, opts)
+          :bundled
+
+        runnable?(id, latest, opts) ->
+          {:ok, modules}
+
+        true ->
+          Logger.warning(
+            "mob_deliver: #{inspect(module)} is in the server's newest manifest, but that " <>
+              "manifest is below this app's floor or was rolled back on this device"
+          )
+
+          :bundled
       end
     end
   end
+
+  # A failure reused from the last refresh: say so, or the navigation just
+  # looks refused for no reason.
+  defp explained({:error, reason} = error, module, age, opts) when age != nil do
+    Logger.warning(
+      "mob_deliver: #{inspect(module)}: the last manifest refresh #{div(age, 1000)}s ago failed " <>
+        "(#{inspect(reason)}); next refresh allowed in #{next_refresh(age, opts)}s"
+    )
+
+    error
+  end
+
+  defp explained(result, _module, _age, _opts), do: result
+
+  # The router's own error for an unknown destination says nothing about
+  # delivery; this does.
+  defp log_absent(module, nil, _opts),
+    do: Logger.info("mob_deliver: #{inspect(module)} isn't in the server's newest manifest")
+
+  defp log_absent(module, age, opts) do
+    Logger.info(
+      "mob_deliver: #{inspect(module)} isn't in the manifest fetched #{div(age, 1000)}s ago; " <>
+        "next refresh allowed in #{next_refresh(age, opts)}s"
+    )
+  end
+
+  defp next_refresh(age, opts), do: div(max(opts[:refresh_interval] - age, 0) + 999, 1000)
 
   # The same bar an install has to clear: built for this app version, and
   # not content this device rolled back.

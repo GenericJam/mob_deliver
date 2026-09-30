@@ -95,4 +95,28 @@ defmodule MobDeliver.HooksTest do
     assert Hooks.before_navigate(MobDeliver.UpdateRequiredScreen, ctx.opts) ==
              {:reset, MobDeliver.UpdateRequiredScreen}
   end
+
+  test "a first frame of the update screen doesn't end the booted update's probation; the app's root does",
+       ctx do
+    {body, manifest} = signed(ctx, %{})
+    {:ok, :installed} = Watchdog.install(ctx.opts[:watchdog], body, manifest, nil)
+
+    # The next launch boots it on probation.
+    booted = :"hooks_wd_booted_#{ctx.n}"
+
+    start_supervised!({Watchdog, name: booted, store: ctx.store, app_version: "1.4.0"},
+      id: booted
+    )
+
+    {:ok, :armed} = Watchdog.on_boot(booted, ctx.verify)
+
+    no_reconcile = fn -> :ok end
+    update_root = %{requested: MyApp.Home, booted: MobDeliver.UpdateRequiredScreen}
+    assert Hooks.first_render(watchdog: booted, root: update_root, reconcile: no_reconcile) == :ok
+    refute Watchdog.ready_to_install?(booted)
+
+    app_root = %{requested: MyApp.Home, booted: MyApp.Home}
+    assert Hooks.first_render(watchdog: booted, root: app_root, reconcile: no_reconcile) == :ok
+    assert Watchdog.ready_to_install?(booted)
+  end
 end

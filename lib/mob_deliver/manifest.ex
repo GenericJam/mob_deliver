@@ -100,20 +100,6 @@ defmodule MobDeliver.Manifest do
   end
 
   @doc """
-  Identity of the code a manifest delivers: the SHA-256 (lowercase hex)
-  of the canonical encoding of its `modules` map.
-
-  Unlike `content_id/1` it ignores `issued_at`, `min_app_version` and
-  `force_update_after`: re-publishing the same modules, or only moving the
-  update window, yields the same id. `MobDeliver.Watchdog` pairs it with
-  the native app version when it records a rejection.
-  """
-  @spec code_id(t()) :: String.t()
-  def code_id(%__MODULE__{modules: modules}) do
-    Base.encode16(:crypto.hash(:sha256, canonical(modules)), case: :lower)
-  end
-
-  @doc """
   The `modules` key for `module`: `"MyApp.HomeScreen"` for Elixir modules,
   `":my_mod"` for Erlang ones (the same shape as `inspect/1`).
   """
