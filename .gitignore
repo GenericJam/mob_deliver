@@ -28,3 +28,7 @@ mob_deliver-*.tar
 *.db
 .beads-credential-key
 .beads/proxieddb/
+
+# Signature is regenerated in CI on every release (never committed, so it
+# can't go stale). The .pub IS committed.
+priv/mob_plugin.sig

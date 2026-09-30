@@ -4,10 +4,10 @@ Content-addressed BEAM delivery for [Mob](https://hexdocs.pm/mob) apps —
 proactive OTA updates *and* JIT screen delivery. "Your mobile app can be
 a website."
 
-> **Status: v0.1.0-dev.** Design + scope + wire format v1 are pinned in
+> **Status: v0.1.** Wire format v1 — design and scope in
 > [`decisions/2026-09-19-scope-and-wire-format.md`](decisions/2026-09-19-scope-and-wire-format.md).
-> Implementation is tracked as child issues of the `mob_deliver-c67` beads
-> epic. Not yet usable in an app; no Hex release yet.
+> Serve it with [mob_deliver_server](https://github.com/GenericJam/mob_deliver_server);
+> generate a wired-up app with `mix mob.new my_app --deliver`.
 
 ## What it does
 

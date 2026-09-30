@@ -6,7 +6,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ---
 
-## [0.1.0-dev] - unreleased
+## [0.1.0] - 2026-09-30
 
 ### Added
 - Scaffold + scope ADR ([`decisions/2026-09-19-scope-and-wire-format.md`](decisions/2026-09-19-scope-and-wire-format.md))
@@ -55,7 +55,10 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
   update screen past the deadline, `:update_screen` configurable), and the
   root screen's first paint ends the update's probation. Older mob keeps
   the stability timer and app-side `resolve/1`.
+- Guides: operator manual and store review.
 
-### Not yet
-- `mob_deliver_server` companion library.
-- mob_new template integration (`mobile/` directory).
+### Related
+- [`mob_deliver_server`](https://github.com/GenericJam/mob_deliver_server)
+  0.1.0: reference publisher + Plug server.
+- `mix mob.new --deliver` (mob_new): generates an app wired for
+  mob_deliver with a `mobile/` expansion screen.

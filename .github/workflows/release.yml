@@ -1,0 +1,189 @@
+name: release
+
+# Trigger model: mix.exs is the source of truth for the version. Bump the
+# `version: "X.Y.Z"` line, commit, push — the workflow detects the change,
+# tags it, creates the GitHub Release, and publishes to Hex.
+#
+# Re-running manually (e.g. to back-fill a Hex publish that was skipped
+# because the tag pre-existed) is via the Actions tab's "Run workflow"
+# button (workflow_dispatch). Each step is independently idempotent:
+# tag-already-exists, release-already-exists, and version-already-on-Hex
+# are each detected per-step, so re-runs only do work that's actually
+# missing.
+on:
+  push:
+    branches: [master]
+    paths: ['mix.exs']
+  workflow_dispatch:
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write   # required to create the GitHub Release AND push the tag
+
+jobs:
+  release:
+    name: Release from mix.exs
+    runs-on: ubuntu-latest
+    env:
+      # Reads the repo secret. Steps that need it gate on
+      # `env.HEX_API_KEY != ''` so a missing secret skips cleanly instead
+      # of failing with an auth error.
+      HEX_API_KEY: ${{ secrets.HEX_API_KEY }}
+      # Shared mob first-party signing key. The Sign step below regenerates
+      # priv/mob_plugin.sig from the CURRENT manifest before publish, so the
+      # published artifact's signature can never drift stale.
+      MOB_PLUGIN_SIGN_KEY: ${{ secrets.MOB_PLUGIN_SIGN_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # full history for changelog generation
+
+      - name: Configure git identity (for the tag push below)
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Extract version from mix.exs
+        id: version
+        run: |
+          # Pull the `version: "X.Y.Z"` from the project/0 keyword list.
+          # Tolerates leading whitespace, expects a literal double-quoted
+          # string (Elixir-mix convention).
+          version=$(grep -E '^\s*version:\s*"' mix.exs | head -1 | sed 's/.*"\([^"]*\)".*/\1/')
+          if [ -z "$version" ]; then
+            # `version: @version` idiom — read the module attribute instead.
+            version=$(grep -E '^\s*@version\s+"' mix.exs | head -1 | sed 's/.*"\([^"]*\)".*/\1/')
+          fi
+          if [ -z "$version" ]; then
+            echo "::error::Could not extract version from mix.exs"
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "Detected version: $version"
+
+      # ── Tag (idempotent: skip if exists) ────────────────────────────
+      - name: Create + push tag (if missing)
+        run: |
+          tag="${{ steps.version.outputs.version }}"
+          if git rev-parse "refs/tags/$tag" >/dev/null 2>&1; then
+            echo "::notice::Tag $tag already exists — skipping tag creation"
+          else
+            git tag "$tag"
+            git push origin "$tag"
+            echo "Created and pushed tag $tag"
+          fi
+
+      # ── GitHub Release (idempotent: skip if exists) ─────────────────
+      - name: Check if GitHub Release exists
+        id: release_check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          tag="${{ steps.version.outputs.version }}"
+          if gh release view "$tag" -R "${{ github.repository }}" >/dev/null 2>&1; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::GitHub Release $tag already exists — skipping release creation"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Extract CHANGELOG section
+        if: steps.release_check.outputs.exists == 'false'
+        id: changelog
+        run: |
+          if [ -f CHANGELOG.md ]; then
+            awk -v tag="${{ steps.version.outputs.version }}" '
+              $0 ~ "^## \\[" tag "\\]" || $0 ~ "^## " tag "( |$)" { in_section=1; next }
+              in_section && /^## / { exit }
+              in_section { print }
+            ' CHANGELOG.md > /tmp/release-body.md
+            if [ -s /tmp/release-body.md ]; then
+              echo "has_body=true" >> "$GITHUB_OUTPUT"
+            else
+              echo "has_body=false" >> "$GITHUB_OUTPUT"
+            fi
+          else
+            echo "has_body=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Create GitHub Release
+        if: steps.release_check.outputs.exists == 'false'
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.version }}
+          name: ${{ steps.version.outputs.version }}
+          body_path: ${{ steps.changelog.outputs.has_body == 'true' && '/tmp/release-body.md' || '' }}
+          generate_release_notes: ${{ steps.changelog.outputs.has_body != 'true' }}
+
+      # ── Hex publish (idempotent: skip if version already on Hex) ────
+      - name: Set up BEAM
+        if: env.HEX_API_KEY != ''
+        uses: erlef/setup-beam@v1
+        with:
+          elixir-version: '1.19'
+          otp-version: '28'
+
+      - name: Check if version is already on Hex
+        if: env.HEX_API_KEY != ''
+        id: hex_check
+        run: |
+          # `mix hex.info <pkg> <vsn>` exits 0 if the version is published,
+          # non-zero otherwise. The package name is the project's `app:` value
+          # in mix.exs — same heuristic as for the version extract.
+          pkg=$(grep -E '^\s*app:\s*:' mix.exs | head -1 | sed 's/.*:\s*:\([a-z_][a-z0-9_]*\).*/\1/')
+          vsn="${{ steps.version.outputs.version }}"
+          if mix hex.info "$pkg" "$vsn" 2>/dev/null | grep -q "Config:"; then
+            echo "exists=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Hex package $pkg $vsn already published — skipping mix hex.publish"
+          else
+            echo "exists=false" >> "$GITHUB_OUTPUT"
+            echo "package=$pkg" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Verify signing key matches committed public key (fail-safe before publish)
+        if: env.HEX_API_KEY != '' && steps.hex_check.outputs.exists == 'false' && env.MOB_PLUGIN_SIGN_KEY != ''
+        run: |
+          # Derive the ed25519 public key from MOB_PLUGIN_SIGN_KEY and compare it to the
+          # committed priv/mob_plugin.pub. A mismatch means the secret is the wrong key
+          # (e.g. a per-repo key instead of the shared first-party key) and would publish
+          # a signature no host can verify — abort here rather than ship a broken release.
+          elixir -e '
+            priv = System.get_env("MOB_PLUGIN_SIGN_KEY") |> String.trim() |> Base.decode64!()
+            {pub, _} = :crypto.generate_key(:eddsa, :ed25519, priv)
+            committed = "priv/mob_plugin.pub" |> File.read!() |> String.trim() |> Base.decode64!()
+            if pub != committed do
+              IO.puts(:stderr, "::error::MOB_PLUGIN_SIGN_KEY does not derive the committed priv/mob_plugin.pub — refusing to publish. Set the secret to the shared mob first-party private key.")
+              System.halt(1)
+            end
+            IO.puts("signing key matches committed public key — OK")
+          '
+
+      - name: Sign plugin (regenerate signature from current manifest)
+        if: env.HEX_API_KEY != '' && steps.hex_check.outputs.exists == 'false' && env.MOB_PLUGIN_SIGN_KEY != ''
+        run: |
+          pkg="${{ steps.hex_check.outputs.package }}"
+          mkdir -p ~/.mob/keys
+          printf '%s' "$MOB_PLUGIN_SIGN_KEY" > ~/.mob/keys/"$pkg".priv
+          chmod 600 ~/.mob/keys/"$pkg".priv
+          mix deps.get
+          mix mob.plugin.sign
+          rm -f ~/.mob/keys/"$pkg".priv
+
+      - name: mix hex.publish
+        if: env.HEX_API_KEY != '' && steps.hex_check.outputs.exists == 'false'
+        # `--yes` skips the interactive confirm. `mix hex.publish` (no
+        # subcommand) ships both the package archive AND docs in one call.
+        run: |
+          mix deps.get
+          mix hex.publish --yes
+
+      - name: Skip Hex publish notice (no API key)
+        if: env.HEX_API_KEY == ''
+        run: |
+          echo "::notice::HEX_API_KEY secret is not set on this repository."
+          echo "::notice::Skipping Hex publish. Add the secret at"
+          echo "::notice::https://github.com/${{ github.repository }}/settings/secrets/actions"
+          echo "::notice::and re-run the workflow (Actions tab → Run workflow) to publish."
