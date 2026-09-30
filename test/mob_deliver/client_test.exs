@@ -35,7 +35,7 @@ defmodule MobDeliver.ClientTest do
       |> Plug.Conn.send_resp(200, body)
     end)
 
-    assert {:ok, %Manifest{app: "com.example.app", channel: "production"}} =
+    assert {:ok, %Manifest{app: "com.example.app", channel: "production"}, ^body} =
              Client.fetch_manifest(opts)
 
     assert_received {:request, "POST", "/deliver/manifest",

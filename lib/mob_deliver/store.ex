@@ -140,9 +140,21 @@ defmodule MobDeliver.Store do
   def rollback(server, expected_active, verify),
     do: GenServer.call(server, {:rollback, expected_active, verify})
 
-  @doc "The id a signed manifest body is known by."
+  @doc """
+  Runs this session on bundled code without touching the persisted slots:
+  `active/1` becomes `nil`, so nothing delivered is looked up or loaded,
+  and installs conflict until the next boot. For boots whose probation
+  state couldn't be made durable.
+  """
+  @spec unpublish(server()) :: :ok
+  def unpublish(server), do: GenServer.call(server, :unpublish)
+
+  @doc """
+  The id a signed manifest is known by — `MobDeliver.Manifest.content_id/1`,
+  so re-encodings of the same signed content share it.
+  """
   @spec manifest_id(binary()) :: manifest_id()
-  def manifest_id(body), do: sha256(body)
+  def manifest_id(body), do: Manifest.content_id(body)
 
   @spec root(server()) :: Path.t()
   def root(server), do: :ets.lookup_element(server, :root, 2)
@@ -187,6 +199,11 @@ defmodule MobDeliver.Store do
             {:reply, error, s}
         end
     end
+  end
+
+  def handle_call(:unpublish, _from, %{table: table} = s) do
+    publish(table, nil)
+    {:reply, :ok, s}
   end
 
   def handle_call({:rollback, expected, verify}, _from, %{table: table, slots: slots} = s) do

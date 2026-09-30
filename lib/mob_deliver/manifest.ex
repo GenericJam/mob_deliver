@@ -82,6 +82,24 @@ defmodule MobDeliver.Manifest do
   end
 
   @doc """
+  Identity of a manifest's *content*: the SHA-256 (lowercase hex) of its
+  signing payload. Different encodings of the same signed manifest
+  (whitespace, key order) share it, so rejection and "already active"
+  can't be dodged by re-serializing. Bodies that aren't JSON objects hash
+  as raw bytes.
+  """
+  @spec content_id(binary()) :: String.t()
+  def content_id(body) when is_binary(body) do
+    payload =
+      case JSON.decode(body) do
+        {:ok, fields} when is_map(fields) -> signing_payload(fields)
+        _ -> body
+      end
+
+    Base.encode16(:crypto.hash(:sha256, payload), case: :lower)
+  end
+
+  @doc """
   The `modules` key for `module`: `"MyApp.HomeScreen"` for Elixir modules,
   `":my_mod"` for Erlang ones (the same shape as `inspect/1`).
   """
@@ -100,6 +118,21 @@ defmodule MobDeliver.Manifest do
   @spec key_module(String.t()) :: module()
   def key_module(":" <> name), do: String.to_atom(name)
   def key_module(name), do: String.to_atom("Elixir." <> name)
+
+  @doc """
+  Like `key_module/1` but never creates an atom: `:error` when the atom
+  doesn't exist yet, i.e. nothing loaded references the module. Safe for
+  keys of manifests whose modules may never be fetched.
+  """
+  @spec existing_module(String.t()) :: {:ok, module()} | :error
+  def existing_module(":" <> name), do: to_existing_atom(name)
+  def existing_module(name), do: to_existing_atom("Elixir." <> name)
+
+  defp to_existing_atom(name) do
+    {:ok, String.to_existing_atom(name)}
+  rescue
+    ArgumentError -> :error
+  end
 
   defp canonical(map) when is_map(map) do
     entries =

@@ -26,14 +26,15 @@ defmodule MobDeliver.Client do
 
   @doc """
   Fetches and verifies the manifest for `:app` on `:channel` from
-  `:endpoint`.
+  `:endpoint`. Returns the parsed manifest and the signed body it came
+  from (what `MobDeliver.Store` persists and re-verifies).
 
   Fails before any request when `:trusted_publish_key` is unset: there is
   no unverified mode. `:req_options` are merged over the defaults, which
   disable Req's automatic retries (scheduling and retry policy belong to
   the caller) and body decoding (the body is verified as raw JSON).
   """
-  @spec fetch_manifest([option()]) :: {:ok, Manifest.t()} | {:error, error()}
+  @spec fetch_manifest([option()]) :: {:ok, Manifest.t(), binary()} | {:error, error()}
   def fetch_manifest(opts) do
     case Keyword.get(opts, :trusted_publish_key) do
       nil -> {:error, :no_trusted_publish_key}
@@ -65,8 +66,9 @@ defmodule MobDeliver.Client do
       body: JSON.encode!(%{"app" => app, "channel" => channel})
     ]
 
-    with {:ok, body} <- request(opts, request_opts) do
-      Manifest.verify(body, trusted_key, app: app, channel: channel)
+    with {:ok, body} <- request(opts, request_opts),
+         {:ok, manifest} <- Manifest.verify(body, trusted_key, app: app, channel: channel) do
+      {:ok, manifest, body}
     end
   end
 

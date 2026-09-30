@@ -29,9 +29,24 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 - `MobDeliver.resolve/1` — JIT delivery of a module and the delivered
   modules it calls, from one pinned manifest, callees loaded before the
   target; single-flight per module and per blob.
+- Slot watchdog + rollback (`MobDeliver.on_start/0`, `mark_stable/0`,
+  `take_rollback_notice/0`): every install boots on probation; a boot
+  that dies before first idle is rolled back on the next launch, the
+  manifest is rejected for good, and the user gets a one-time notice.
+  Delivered modules on the device load at boot before app code.
+- `MobDeliver.check/0` and the poller: checks at boot, every
+  `:poll_interval` (default 1h), and on a mob_wake silent push
+  (`:mob_deliver_check`, `:on_push`). Prefetches new versions of modules
+  the device already runs, then installs through the watchdog; one
+  unproven install at a time. `resolve/1` waits for one check when
+  nothing is installed yet and no bundled version exists.
+- Forced-update window (`MobDeliver.update_status/0`, `root_screen/2`,
+  `open_store/0`, `MobDeliver.UpdateRequiredScreen`): below
+  `min_app_version` the app gets `{:recommended, _}` until
+  `force_update_after`, then boots into the update screen and `resolve/1`
+  refuses. Follows the newest verified manifest (replay-safe), configured
+  via `:app_version` and `:store_url`.
 
 ### Not yet
-- Slot-based watchdog + rollback.
-- Forced-update window UX.
 - `mob_deliver_server` companion library.
 - mob_new template integration (`mobile/` directory).

@@ -90,20 +90,29 @@ Two fields carry the version discipline:
 
 Between publishing the manifest and `force_update_after`, users get an in-app "update recommended" banner that links to the store. After the deadline, the app hard-stops until updated. This is the same pattern every mobile OTA system converges on (Instagram, Discord, Slack); users are used to it.
 
+As implemented (`MobDeliver.Gate`):
+
+* The gate follows the **newest verified manifest the device has fetched**, installed or not — a manifest the app is too old for is never installed (`check/0` → `{:ok, :below_min_version}`), but its floor must still gate. It applies the moment it's verified (even if persisting fails), is persisted as the signed body, and is reloaded and re-verified whenever the gate process starts, so it holds offline and across restarts; an older signed manifest (lower `issued_at`) can't replace a newer one to lift the gate by replay.
+* The native app version comes from `config :mob_deliver, :app_version` — mob has no runtime accessor for `CFBundleShortVersionString`/`versionName`. Versions compare as dotted integers with missing segments as 0 (`"1.4" == "1.4.0"`). If either side isn't in that form, the gate stays **open** and logs: it's an update prompt, not a security boundary.
+* **Before navigation:** mob has no pre-navigation hook yet (`mob_deliver-g90`), so the gate applies at the two points mob_deliver controls — the root screen (`MobDeliver.root_screen/2` in the app's `on_start` returns `MobDeliver.UpdateRequiredScreen` once required, so no user screen mounts) and `resolve/1` (refuses with `{:error, :update_required}`, loaded or not, once the router hook calls it).
+* Banner: `MobDeliver.update_status/0` → `{:recommended, info}` for the app to render; `MobDeliver.open_store/0` opens `:store_url`.
+
 ### Client-side rollback
 
 Most BEAM changes are safe to hot-load module-by-module — the OTP runtime handles two-version live-load transparently, and a bad module can just be reloaded to the previous version. The problem case is **updates that touch `on_start`**: if a module needed at boot crashes, the app is bricked from the user's POV until a store update lands (weeks).
 
-`mob_deliver` uses a slot-based watchdog for these cases:
+`mob_deliver` uses a slot-based watchdog. As implemented (`MobDeliver.Store`, `MobDeliver.Watchdog`):
 
-* Track two BEAM slots on disk: `active/` and `previous/`.
-* On install of a `restart_required: true` update:
-  * Unpack into `pending/`, verify signatures, atomic-rename `active/` → `previous/` and `pending/` → `active/`.
-  * Write a `watchdog.pending` beacon file with the new SHA set.
-  * On restart, boot from `active/`.
-* After the app reaches its first idle callback, clear `watchdog.pending`.
-* If the next boot finds `watchdog.pending` unchanged from before restart, the BEAM must have crashed pre-idle → atomic-swap `active/` ↔ `previous/` and boot the rollback tree.
-* Present a one-time "your last update failed and was rolled back" notice on the user's next successful boot.
+* Two slots, **active** and **previous**, each holding a signed manifest body, live together in one `state` file. Switching slots is one durable atomic write of that file (the original `active/` ↔ `previous/` directory-rename plan had a window where `active/` didn't exist). Blobs are shared content-addressed files, so slots don't copy BEAMs.
+* Every install is guarded — there's no reliable way to know which modules an update's boot path touches, so no `restart_required` distinction. `Watchdog.install/4` is one serialized transaction: arm the beacon for X, then activate X against the caller's compare-and-set token (disarming again if activation fails). A crash in between leaves a beacon for a non-active manifest, discarded next boot. Watchdog state changes in memory only after its durable write succeeds.
+* The first boot of X increments the beacon; reaching **first idle** disarms it. mob has no first-idle callback, so first idle is `MobDeliver.mark_stable/0` (call it from the root screen once rendered) or, failing that, `:stable_after` ms (default 5000) after boot. Only the manifest this session *booted* can be vouched for — a manifest installed during a session hasn't booted yet.
+* A boot that finds X still armed from a previous boot rolls back: X goes on a durable **rejected** list (never pruned) with a one-time notice, then the store reinstates previous (or bundled code if none). The rejected list is authoritative — any boot with a rejected manifest active rolls it back, so a crash mid-rollback completes next time, and the poller never reinstalls X. Manifests are identified by **content** (`Manifest.content_id/1`, the SHA-256 of the canonical signing payload), so re-serializing the same signed manifest can't dodge rejection or "already active".
+* If the boot counter, the rejection, or the rollback can't be made durable, that boot runs **bundled code** (`Store.unpublish/1`): delivered code never runs without a durable probation record.
+* After a rollback nothing is armed, so repeated crashes never ping-pong between slots.
+* **One unproven install at a time:** an install is deferred (`{:ok, :deferred}`) while anything is armed — the booted manifest still on probation, or a manifest installed this session that hasn't booted yet. Otherwise a second install would displace the beacon and a crash would roll back onto an unproven manifest; this way previous is always a proven manifest or bundled code. Re-installing the active manifest is a no-op that leaves its beacon alone.
+* Boot loads the delivered modules whose blobs are local, callees before callers (imports chunk), each bounded by a timeout so a delivered `@on_load` can't hang app boot.
+* Delivered modules that are *already loaded* are not hot-swapped mid-session: a running session keeps its code, the new manifest's blobs load at the next boot (before any app code runs), and modules not yet loaded resolve to the new manifest immediately via `resolve/1`. This keeps the rollback guarantee meaningful — everything that runs a new version has been through a probation boot.
+* `MobDeliver.take_rollback_notice/0` returns the "your last update failed and was rolled back" notice exactly once.
 
 Bricking impossible; user visibility on rollback preserved.
 

@@ -7,7 +7,10 @@ defmodule MobDeliver.Application do
   def start(_type, _args) do
     children = [
       MobDeliver.SingleFlight,
-      MobDeliver.Store
+      MobDeliver.Store,
+      MobDeliver.Watchdog,
+      MobDeliver.Gate,
+      MobDeliver.Poller
     ]
 
     Supervisor.start_link(children, strategy: :one_for_one, name: MobDeliver.Supervisor)

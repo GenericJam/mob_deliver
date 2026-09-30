@@ -89,18 +89,55 @@ end
 # mob.exs
 config :mob, :plugins, [:mob_deliver]
 
-# config/config.exs — the trust root for THIS app's deliverables
+# config/config.exs
 config :mob_deliver,
   # Compile time: baked into the reviewed binary. "ed25519:" <> base64 of the
-  # raw 32-byte public key.
+  # raw 32-byte public key. The trust root for THIS app's deliverables.
   trusted_publish_key: "ed25519:<base64-of-your-app's-Ed25519-public-key>",
   app: "com.example.myapp",
   endpoint: "https://updates.myapp.com",
   channel: :production,
-  # Optional, merged into every Req request — e.g. `connect_options:
+  # The native app version (mob can't read it at runtime) and store page,
+  # for the forced-update window.
+  app_version: "1.4.0",
+  store_url: "https://apps.apple.com/app/id000000000",
+  # Optional:
+  poll_interval: :timer.hours(1),  # false = only boot + push checks
+  on_push: true,                   # register the mob_wake :mob_deliver_check handler
+  stable_after: 5_000,             # ms until "first idle" if mark_stable/0 isn't called
+  # Merged into every Req request — e.g. `connect_options:
   # [transport_opts: [cacerts: ...]]` where the BEAM has no system trust store.
   req_options: []
 ```
+
+## Usage
+
+```elixir
+# The app's on_start — the plugin's own on_start has already verified the
+# store, rolled back a failed update if needed, and loaded delivered code.
+def on_start do
+  {:ok, _} = Mob.Screen.start_root(MobDeliver.root_screen(MyApp.HomeScreen))
+end
+
+# In the root screen, once it has rendered: ends the update's probation.
+MobDeliver.mark_stable()
+
+# Once per launch, e.g. in the root screen's mount:
+if MobDeliver.take_rollback_notice(), do: show_notice("Your last update failed and was rolled back.")
+
+case MobDeliver.update_status() do
+  {:recommended, _info} -> show_update_banner()  # its button calls MobDeliver.open_store()
+  _ -> :ok
+end
+
+# Before navigating to a screen that may not be on the device yet
+# (until mob's router calls it itself, mob_deliver-g90):
+:ok = MobDeliver.resolve(MyApp.ExpansionScreen)
+```
+
+Update checks run at boot, every `:poll_interval`, and on a silent push
+whose data carries `"mob_wake_id": "mob_deliver_check"` (with `mob_wake`
+installed). `MobDeliver.check/0` runs one now.
 
 ## Development
 

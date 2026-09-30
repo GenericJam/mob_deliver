@@ -3,25 +3,34 @@ defmodule MobDeliver.Resolver do
   # JIT delivery: make `module` callable, fetching it (and the delivered
   # modules it calls) on a cache miss. See MobDeliver.resolve/1.
 
-  alias MobDeliver.{Client, Config, Loader, Manifest, SingleFlight, Store}
+  alias MobDeliver.{Config, Fetcher, Gate, Loader, Manifest, SingleFlight, Store}
 
-  @type opts :: [store: Store.server(), single_flight: GenServer.server(), client_opts: keyword()]
+  @type opts :: [
+          store: Store.server(),
+          single_flight: GenServer.server(),
+          gate: GenServer.server(),
+          client_opts: keyword(),
+          check: (-> term())
+        ]
 
   @spec resolve(module(), opts()) :: :ok | {:error, term()}
   def resolve(module, opts \\ []) when is_atom(module) do
     opts = defaults(opts)
 
-    # One manifest for the whole closure: an activation mid-resolve must not
-    # pair this release's target with the next release's helpers.
-    with false <- :code.is_loaded(module) != false,
-         {_id, %Manifest{modules: modules}} <- Store.active(opts[:store]),
-         {:ok, _sha} <- Map.fetch(modules, Manifest.module_key(module)) do
+    # Past the forced-update deadline nothing navigates, loaded or not: the
+    # gate runs before navigation.
+    with :ok <- open_gate(opts),
+         false <- :code.is_loaded(module) != false,
+         # One manifest for the whole closure: an activation mid-resolve must
+         # not pair this release's target with the next release's helpers.
+         {:ok, modules} <- manifest_for(module, opts) do
       SingleFlight.run(opts[:single_flight], {:resolve, module}, fn ->
         deliver(module, modules, opts)
       end)
     else
+      {:error, :update_required} = refused -> refused
       true -> :ok
-      _not_delivered -> bundled(module)
+      :bundled -> bundled(module)
     end
   end
 
@@ -29,7 +38,52 @@ defmodule MobDeliver.Resolver do
     opts
     |> Keyword.put_new(:store, Store)
     |> Keyword.put_new(:single_flight, SingleFlight)
+    |> Keyword.put_new(:gate, Gate)
     |> Keyword.put_new_lazy(:client_opts, &Config.client_opts/0)
+    |> Keyword.put_new(:check, &MobDeliver.check/0)
+  end
+
+  defp open_gate(opts) do
+    case Gate.status(opts[:gate], Keyword.take(opts, [:app_version, :now])) do
+      {:required, _} -> {:error, :update_required}
+      _ -> :ok
+    end
+  end
+
+  # The active manifest's module map if it delivers `module`. With nothing
+  # installed yet (a first launch racing its boot check) and no bundled
+  # version to fall back on, wait for one check and look again.
+  defp manifest_for(module, opts) do
+    key = Manifest.module_key(module)
+
+    case delivering(key, opts) do
+      {:ok, _} = found ->
+        found
+
+      :none ->
+        if :code.which(module) == :non_existing do
+          opts[:check].()
+          # Whatever the check installed, anything but a delivering
+          # manifest means bundled code (or :not_found).
+          case delivering(key, opts) do
+            {:ok, _} = found -> found
+            _ -> :bundled
+          end
+        else
+          :bundled
+        end
+
+      :absent ->
+        :bundled
+    end
+  end
+
+  defp delivering(key, opts) do
+    case Store.active(opts[:store]) do
+      {_id, %Manifest{modules: %{^key => _} = modules}} -> {:ok, modules}
+      {_id, _} -> :absent
+      nil -> :none
+    end
   end
 
   defp bundled(module) do
@@ -62,31 +116,13 @@ defmodule MobDeliver.Resolver do
   defp closure([mod | rest], found, seen, modules, opts) do
     with false <- MapSet.member?(seen, mod) or :code.is_loaded(mod) != false,
          {:ok, sha} <- Map.fetch(modules, Manifest.module_key(mod)),
-         {:ok, binary} <- blob(sha, opts) do
+         {:ok, binary} <- Fetcher.ensure_blob(sha, opts) do
       next = rest ++ Loader.imported_modules(binary)
       closure(next, [{mod, sha, binary} | found], MapSet.put(seen, mod), modules, opts)
     else
       # Already collected/loaded, or not delivered (bundled/OTP): skip.
       skip when skip in [true, :error] -> closure(rest, found, seen, modules, opts)
       {:error, _} = error -> error
-    end
-  end
-
-  defp blob(sha, opts) do
-    with {:error, reason} when reason in [:missing, :corrupt] <-
-           Store.read_blob(opts[:store], sha) do
-      SingleFlight.run(opts[:single_flight], {:blob, sha}, fn -> fetch_blob(sha, opts) end)
-    end
-  end
-
-  # Re-checked inside the flight: another resolve may have stored it
-  # between our read and acquiring the key.
-  defp fetch_blob(sha, opts) do
-    with {:error, reason} when reason in [:missing, :corrupt] <-
-           Store.read_blob(opts[:store], sha),
-         {:ok, binary} <- Client.fetch_beam(sha, opts[:client_opts]),
-         :ok <- Store.put_blob(opts[:store], sha, binary) do
-      {:ok, binary}
     end
   end
 

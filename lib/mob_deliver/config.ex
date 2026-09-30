@@ -24,6 +24,22 @@ defmodule MobDeliver.Config do
       )
   end
 
+  @doc """
+  How long after boot the app counts as stable if it doesn't call
+  `MobDeliver.mark_stable/0` first (default 5s).
+  """
+  @spec stable_after() :: non_neg_integer()
+  def stable_after, do: get(:stable_after) || 5_000
+
+  @doc "Update-check interval in ms (default one hour); `false` disables timed checks."
+  @spec poll_interval() :: pos_integer() | false
+  def poll_interval do
+    case get(:poll_interval) do
+      nil -> :timer.hours(1)
+      value -> value
+    end
+  end
+
   @spec app() :: String.t() | nil
   def app, do: get(:app)
 

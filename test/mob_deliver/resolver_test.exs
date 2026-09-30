@@ -221,6 +221,61 @@ defmodule MobDeliver.ResolverTest do
     assert fetch_count(sha(new_helper)) == 0
   end
 
+  test "with nothing installed yet, a delivered-only module waits for one check", ctx do
+    {mod, bin} = beam("defmodule MobDeliverJit#{ctx.id}.FirstLaunch do def hi, do: :jit end")
+    test_pid = self()
+
+    check = fn ->
+      send(test_pid, :checked)
+      activate_manifest(ctx, [{mod, bin}])
+    end
+
+    opts = Keyword.put(serving(ctx, %{sha(bin) => bin}), :check, check)
+
+    assert Resolver.resolve(mod, opts) == :ok
+    assert_received :checked
+    assert mod.hi() == :jit
+  end
+
+  test "a check that installs a manifest without the module leaves it :not_found", ctx do
+    check = fn -> activate_manifest(ctx, []) end
+    opts = Keyword.put(serving(ctx, %{}), :check, check)
+
+    assert Resolver.resolve(:"Elixir.MobDeliverJit#{ctx.id}.NotShipped", opts) ==
+             {:error, :not_found}
+  end
+
+  test "past the forced-update deadline nothing resolves, loaded or not", ctx do
+    gate = :"resolver_gate_#{ctx.id}"
+    start_supervised!({MobDeliver.Gate, name: gate, store: ctx.store}, id: gate)
+
+    body =
+      %{"min_app_version" => "2.0", "force_update_after" => "2026-10-19T00:00:00Z"}
+      |> TestPublisher.fields()
+      |> TestPublisher.sign(ctx.private)
+      |> JSON.encode!()
+
+    {:ok, manifest} =
+      Manifest.verify(body, ctx.key, app: "com.example.app", channel: "production")
+
+    :ok = MobDeliver.Gate.record(gate, body, manifest)
+
+    opts = serving(ctx, %{}) ++ [gate: gate, app_version: "1.0"]
+
+    assert Resolver.resolve(Enum, opts ++ [now: ~U[2026-11-01 00:00:00Z]]) ==
+             {:error, :update_required}
+
+    assert Resolver.resolve(Enum, opts ++ [now: ~U[2026-10-01 00:00:00Z]]) == :ok
+  end
+
+  test "with nothing installed yet, bundled code resolves without a check", ctx do
+    opts = Keyword.put(serving(ctx, %{}), :check, fn -> flunk("no check expected") end)
+
+    # stdlib's :erl_tar is on the code path but not loaded in the test VM.
+    assert Resolver.resolve(:erl_tar, opts) == :ok
+    assert :code.is_loaded(:erl_tar) != false
+  end
+
   test "module keys round-trip for Elixir and Erlang modules" do
     for module <- [MobDeliver.Store, :lists] do
       assert module |> Manifest.module_key() |> Manifest.key_module() == module

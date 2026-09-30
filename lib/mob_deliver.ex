@@ -92,7 +92,45 @@ defmodule MobDeliver do
   when no key was configured at build time.
   """
   @spec fetch_manifest() :: {:ok, MobDeliver.Manifest.t()} | {:error, Client.error()}
-  def fetch_manifest, do: Client.fetch_manifest(Config.client_opts())
+  def fetch_manifest do
+    with {:ok, manifest, _body} <- Client.fetch_manifest(Config.client_opts()),
+         do: {:ok, manifest}
+  end
+
+  @doc """
+  Checks for an update now (the poller also runs this at boot, every
+  `:poll_interval`, and on a silent push).
+
+    * `{:ok, :installed}` — a new manifest is active; its new versions of
+      modules this session already runs load at the next launch (after
+      prefetching them now), modules not yet loaded resolve to it at once.
+    * `{:ok, :current}` — nothing new.
+    * `{:ok, :rejected}` — the published manifest was rolled back on this
+      device before; it's never reinstalled.
+    * `{:ok, :deferred}` — an installed update hasn't passed its probation
+      boot yet (see `mark_stable/0`); retried after it.
+    * `{:ok, :below_min_version}` — this app version is below the
+      manifest's `min_app_version`: not installed, but the update gate
+      (`update_status/0`) now follows it.
+    * `{:error, reason}` — fetch, verification, or prefetch failed; nothing
+      changed.
+
+  Concurrent calls share one check.
+  """
+  @spec check() :: {:ok, MobDeliver.Installer.outcome()} | {:error, term()}
+  def check,
+    do:
+      MobDeliver.SingleFlight.run(MobDeliver.SingleFlight, :check, &MobDeliver.Installer.check/0)
+
+  @doc false
+  # mob_wake :push handler registered as :mob_deliver_check (see MobDeliver.Poller).
+  @spec on_wake_push(map() | nil) :: :ok | {:error, :retry}
+  def on_wake_push(_payload) do
+    case check() do
+      {:ok, _} -> :ok
+      {:error, _} -> {:error, :retry}
+    end
+  end
 
   @doc """
   Makes `module` callable, fetching it on a cache miss (JIT delivery).
@@ -111,4 +149,70 @@ defmodule MobDeliver do
   """
   @spec resolve(module()) :: :ok | {:error, term()}
   def resolve(module), do: MobDeliver.Resolver.resolve(module)
+
+  @doc """
+  Plugin lifecycle `on_start` (see `priv/mob_plugin.exs`). Runs before the
+  app's own `on_start`: re-verifies the stored manifest, rolls back one
+  that never reached first idle, loads the delivered modules already on
+  the device, and starts the stability timer. Never raises; on any
+  failure the app runs its bundled code.
+  """
+  @spec on_start() :: :ok
+  def on_start, do: MobDeliver.Boot.run()
+
+  @doc """
+  Tells the watchdog the app reached first idle: the supervision tree is
+  up and the first screen mounted. Call it from your root screen once it
+  has rendered; otherwise the app counts as stable `:stable_after` ms
+  (default 5000) after boot.
+
+  Until then, a freshly installed manifest is on probation: if this boot
+  dies before getting here, the next boot rolls the manifest back.
+  """
+  @spec mark_stable() :: :ok | {:error, term()}
+  def mark_stable, do: MobDeliver.Watchdog.mark_stable(MobDeliver.Watchdog)
+
+  @doc """
+  Returns `%{rolled_back: manifest_id, at: DateTime.t()}` exactly once
+  after the watchdog rolled back a failed update, else `nil`. Show the
+  user a one-time "your last update failed and was rolled back" notice.
+  """
+  @spec take_rollback_notice() :: MobDeliver.Watchdog.notice() | nil
+  def take_rollback_notice, do: MobDeliver.Watchdog.take_notice(MobDeliver.Watchdog)
+
+  @doc """
+  The forced-update window for this app version right now (see
+  `MobDeliver.Gate`): `:ok`, `{:recommended, info}` — show an "update
+  available" banner that calls `open_store/0` — or `{:required, info}`.
+  Needs `config :mob_deliver, app_version: "1.4.0"` (and `:store_url`).
+  """
+  @spec update_status() :: MobDeliver.Gate.status()
+  def update_status, do: MobDeliver.Gate.status()
+
+  @doc """
+  The screen to boot into: `screen`, or `update_screen` (default
+  `MobDeliver.UpdateRequiredScreen`) once the app is past
+  `force_update_after` and below `min_app_version`. Decide the root with
+  it so the gate applies before any user screen mounts:
+
+      def on_start do
+        {:ok, _} = Mob.Screen.start_root(MobDeliver.root_screen(MyApp.HomeScreen))
+      end
+  """
+  @spec root_screen(module(), module()) :: module()
+  def root_screen(screen, update_screen \\ MobDeliver.UpdateRequiredScreen) do
+    case update_status() do
+      {:required, _} -> update_screen
+      _ -> screen
+    end
+  end
+
+  @doc "Opens `config :mob_deliver, :store_url` (the app's store page)."
+  @spec open_store() :: :ok | {:error, :no_store_url}
+  def open_store do
+    case MobDeliver.Config.get(:store_url) do
+      nil -> {:error, :no_store_url}
+      url -> Mob.Device.open_url(url)
+    end
+  end
 end
