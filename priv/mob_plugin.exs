@@ -9,10 +9,10 @@
   # Code.load_binary/3, Mob.data_dir/0, and standard :public_key / :crypto
   # from the OTP runtime for signature verification.
   nifs: [],
-  # No plugin-declared permissions. Network access is via the host's
-  # existing HTTP stack (Req / Finch / Mint — whatever the app already
-  # ships). The manifest fetch endpoint is app-configured, not framework-
-  # framework-declared.
+  # No plugin-declared permissions. Network access is via Req (the HTTP
+  # stack mob apps already ship on-device); TLS trust options come from the
+  # host through `config :mob_deliver, :req_options`. The manifest fetch
+  # endpoint is app-configured, not framework-declared.
   # Note about the trust key: mob_deliver's own manifest (this file) is
   # signed by the shared mob first-party key for plugin-load verification.
   # That's a DIFFERENT trust root than the one an app uses to sign its own

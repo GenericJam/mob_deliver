@@ -15,10 +15,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
   server directory layout.
 - `MobDeliver` moduledoc — surface preview.
 - `priv/mob_plugin.exs` — plugin manifest (no NIFs; pure Elixir plugin).
+- `MobDeliver.fetch_manifest/0` — `POST /manifest` against the configured
+  endpoint, verified against the compile-time `:trusted_publish_key`
+  (`MobDeliver.Client`, `MobDeliver.Manifest`). Hard-fails on a missing,
+  malformed, or mismatched signature, and on a signed manifest for a
+  different app or channel. The canonical signing payload is specified
+  in the ADR.
 
 ### Not yet
 - Content-addressed on-device store implementation.
-- Manifest fetch + Ed25519 verification.
 - `MobDeliver.resolve/1` router-integration API.
 - Slot-based watchdog + rollback.
 - Forced-update window UX.

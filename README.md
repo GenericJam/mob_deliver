@@ -91,9 +91,15 @@ config :mob, :plugins, [:mob_deliver]
 
 # config/config.exs — the trust root for THIS app's deliverables
 config :mob_deliver,
+  # Compile time: baked into the reviewed binary. "ed25519:" <> base64 of the
+  # raw 32-byte public key.
   trusted_publish_key: "ed25519:<base64-of-your-app's-Ed25519-public-key>",
+  app: "com.example.myapp",
   endpoint: "https://updates.myapp.com",
-  channel: :production
+  channel: :production,
+  # Optional, merged into every Req request — e.g. `connect_options:
+  # [transport_opts: [cacerts: ...]]` where the BEAM has no system trust store.
+  req_options: []
 ```
 
 ## Development

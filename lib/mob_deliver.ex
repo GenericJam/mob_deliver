@@ -73,4 +73,34 @@ defmodule MobDeliver do
   rationale on why these are punted and what wire-format hooks are
   already in place to let each one land as an additive change later.
   """
+
+  alias MobDeliver.Client
+
+  # Baked in at compile time: the trust root ships inside the reviewed binary
+  # and can't be swapped by anything delivered later.
+  @trusted_publish_key Application.compile_env(:mob_deliver, :trusted_publish_key)
+
+  @doc """
+  Fetches the current manifest for this app + channel and verifies its
+  signature against the compile-time `:trusted_publish_key`.
+
+      config :mob_deliver,
+        trusted_publish_key: "ed25519:<base64 raw 32-byte public key>",
+        app: "com.example.myapp",
+        endpoint: "https://updates.myapp.com",
+        channel: :production,
+        # optional, merged into the Req request (TLS trust, timeouts, …)
+        req_options: []
+
+  Returns `{:error, :no_trusted_publish_key}` without touching the network
+  when no key was configured at build time.
+  """
+  @spec fetch_manifest() :: {:ok, MobDeliver.Manifest.t()} | {:error, Client.error()}
+  def fetch_manifest do
+    :mob_deliver
+    |> Application.get_all_env()
+    |> Keyword.take([:app, :endpoint, :channel, :req_options])
+    |> Keyword.put(:trusted_publish_key, @trusted_publish_key)
+    |> Client.fetch_manifest()
+  end
 end

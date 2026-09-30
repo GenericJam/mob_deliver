@@ -20,14 +20,15 @@ An on-device content-addressed BEAM store (SHA-256 → `.beam` blob) plus two tr
 
 ## Anatomy of the plugin
 
-* `lib/mob_deliver.ex` — public API. Currently a placeholder + moduledoc; child issues fill it in.
+* `lib/mob_deliver.ex` — public API. `fetch_manifest/0` (reads config; trusted key via `compile_env`); `resolve/1`, `check/0`, etc. land with their issues.
+* `lib/mob_deliver/manifest.ex` — wire format v1 manifest: canonical signing payload, Ed25519 verification, typed parse. Signature is checked before any field is read.
+* `lib/mob_deliver/client.ex` — `POST /manifest` over Req (retries + body decoding off; TLS options via `:req_options`).
 * `priv/mob_plugin.exs` — plugin manifest. No NIFs (pure Elixir). Lifecycle `on_start` initialises the content-addressed store + arms the watchdog.
 * `decisions/` — ADRs. **Read `2026-09-19-scope-and-wire-format.md` first.** Everything else in the repo defers to it.
-* `test/` — placeholder scaffold; property-tests for signature verification + store atomicity are the highest-value coverage as the plugin lands.
+* `test/` — manifest verification invariants (tamper/forgery/cross-channel/canonical payload golden vector) and client wire behaviour via `Req.Test`. `test/test_helper.exs` defines `MobDeliver.TestPublisher`, the signing side of the wire. Store atomicity + watchdog property tests land with their issues.
 
 Not yet present (deferred to implementation issues):
 * `lib/mob_deliver/store.ex` — on-device content-addressed store (open ETS table + on-disk directory keyed by SHA).
-* `lib/mob_deliver/verify.ex` — Ed25519 manifest signature verification against the app-declared trusted publish key.
 * `lib/mob_deliver/watchdog.ex` — slot-based rollback state machine.
 * `lib/mob_deliver/router.ex` — `resolve/1` cache-miss fetch for the router.
 * `lib/mob_deliver/poller.ex` — schedule/silent-push-triggered manifest checks.

@@ -61,6 +61,11 @@ defmodule MobDeliver.MixProject do
       # Plugin manifest validator lives here. Dev/test only — the host app
       # supplies mob_dev at build time.
       {:mob_dev, "~> 0.6", only: [:dev, :test], runtime: false},
+      # HTTP for the manifest/beam fetches. Runtime dep; ranges cover the
+      # Req versions sibling apps already ship on-device.
+      {:req, "~> 0.5 or ~> 0.6 or ~> 0.7"},
+      # Req.Test stubs need Plug (dev too: mob_dev's bandit requires it there).
+      {:plug, "~> 1.18", only: [:dev, :test]},
       # Code quality — Credo + ex_slop (AI-pattern checks) + jump_credo_checks,
       # mirroring mob core's pre-commit gate.
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
