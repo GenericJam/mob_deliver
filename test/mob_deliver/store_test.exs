@@ -208,4 +208,34 @@ defmodule MobDeliver.StoreTest do
       assert {:ok, %Manifest{}} = Task.await(booting)
     end
   end
+
+  describe "gc" do
+    test "keeps what active and previous reference, drops the rest and stray temp files",
+         %{private: private, verify: verify} = ctx do
+      for bin <- ["old", "prev", "cur", "orphan"],
+          do: :ok = Store.put_blob(ctx.store, sha(bin), bin)
+
+      activate!(ctx.store, signed_body(private, [{"MyApp.A", "old"}]), verify)
+      activate!(ctx.store, signed_body(private, [{"MyApp.A", "prev"}]), verify)
+      activate!(ctx.store, signed_body(private, [{"MyApp.A", "cur"}]), verify)
+      File.write!(Path.join([ctx.root, "blobs", sha("cur") <> ".tmp-123"]), "partial")
+      File.write!(Path.join(ctx.root, "state.tmp-456"), "partial")
+
+      assert Store.gc(ctx.store) == {:ok, 4}
+
+      assert ctx.root |> Path.join("blobs") |> File.ls!() |> Enum.sort() ==
+               Enum.sort([sha("prev"), sha("cur")])
+
+      refute File.exists?(Path.join(ctx.root, "state.tmp-456"))
+    end
+
+    test "deletes nothing when a slot can't be parsed", ctx do
+      :ok = Store.put_blob(ctx.store, sha("keep"), "keep")
+      write_state(ctx.root, %{active: "not json", previous: nil})
+      Store.boot(ctx.store, fn _ -> {:ok, :unused} end)
+
+      assert Store.gc(ctx.store) == {:error, :unparseable_slot}
+      assert Store.has_blob?(ctx.store, sha("keep"))
+    end
+  end
 end

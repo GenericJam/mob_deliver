@@ -45,6 +45,12 @@ defmodule MobDeliver.Boot do
 
         load_active(store, Keyword.get(opts, :load_timeout, @load_timeout))
 
+        # Nothing can be fetching yet: update checks start later, and no app
+        # code (resolve/1) has run.
+        with {:error, reason} <- Store.gc(store) do
+          Logger.warning("mob_deliver: blob cleanup skipped (#{inspect(reason)})")
+        end
+
       {:error, reason} ->
         Logger.error(
           "mob_deliver: probation state unavailable (#{inspect(reason)}); running bundled code"

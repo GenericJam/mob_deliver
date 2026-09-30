@@ -150,6 +150,18 @@ defmodule MobDeliver.Store do
   def unpublish(server), do: GenServer.call(server, :unpublish)
 
   @doc """
+  Deletes blobs referenced by neither the active nor the previous manifest
+  (previous stays: it's the rollback target), plus temp files left by
+  interrupted writes. Deletes nothing if either slot can't be parsed.
+
+  Boot-only: blob writes don't go through this process, so it must run
+  when nothing can be fetching — `MobDeliver.Boot` calls it before update
+  checks start and before any app code can call `resolve/1`.
+  """
+  @spec gc(server()) :: {:ok, non_neg_integer()} | {:error, term()}
+  def gc(server), do: GenServer.call(server, :gc)
+
+  @doc """
   The id a signed manifest is known by — `MobDeliver.Manifest.content_id/1`,
   so re-encodings of the same signed content share it.
   """
@@ -199,6 +211,27 @@ defmodule MobDeliver.Store do
             {:reply, error, s}
         end
     end
+  end
+
+  def handle_call(:gc, _from, %{table: table, slots: slots} = s) do
+    reply =
+      with {:ok, keep} <- referenced(slots) do
+        blobs = Path.join(root(table), "blobs")
+        root_tmp = Path.wildcard(Path.join(root(table), "*.tmp-*"))
+
+        doomed =
+          case File.ls(blobs) do
+            {:ok, names} ->
+              for name <- names, not MapSet.member?(keep, name), do: Path.join(blobs, name)
+
+            {:error, _} ->
+              []
+          end
+
+        {:ok, Enum.count(doomed ++ root_tmp, &(File.rm(&1) == :ok))}
+      end
+
+    {:reply, reply, s}
   end
 
   def handle_call(:unpublish, _from, %{table: table} = s) do
@@ -294,6 +327,23 @@ defmodule MobDeliver.Store do
 
   defp body_id(nil), do: nil
   defp body_id(body), do: manifest_id(body)
+
+  # SHAs the active and previous manifests reference. Slot bodies were
+  # verified when stored/booted; here they only decide what to keep.
+  defp referenced(slots) do
+    [slots.active, slots.previous]
+    |> Enum.reject(&is_nil/1)
+    |> Enum.reduce_while({:ok, MapSet.new()}, fn body, {:ok, keep} ->
+      case JSON.decode(body) do
+        {:ok, %{"modules" => modules}} when is_map(modules) ->
+          shas = for {_key, "sha256:" <> sha} <- modules, do: sha
+          {:cont, {:ok, MapSet.union(keep, MapSet.new(shas))}}
+
+        _ ->
+          {:halt, {:error, :unparseable_slot}}
+      end
+    end)
+  end
 
   defp state_path(server), do: Path.join(root(server), "state")
 

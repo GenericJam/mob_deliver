@@ -46,6 +46,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
   `force_update_after`, then boots into the update screen and `resolve/1`
   refuses. Follows the newest verified manifest (replay-safe), configured
   via `:app_version` and `:store_url`.
+- Blob cleanup at boot (`MobDeliver.Store.gc/1`): blobs referenced by
+  neither the active nor the previous manifest, and temp files from
+  interrupted writes, are deleted before update checks start.
 
 ### Not yet
 - `mob_deliver_server` companion library.
