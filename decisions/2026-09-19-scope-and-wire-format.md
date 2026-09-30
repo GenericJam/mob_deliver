@@ -159,6 +159,6 @@ Both stores allow OTA of interpreted / bytecode-hosted code within a runtime shi
 
 ## Related
 
-* `MOB-XXX` (this epic) — the Linear parent for v1 implementation.
+* `mob_deliver-c67` (beads epic) — the parent for v1 implementation; run `bd list --parent mob_deliver-c67` for the child issues.
 * Sibling plugins: `mob_wake` (silent-push wake, complements the "when to check" story), `mob_notify` / `mob_push` (the visible-notification quartet), `mob_background` (continuous-keep-alive; different concern).
 * Prior art we're deliberately NOT copying wholesale but do learn from: React Native CodePush (JS bundles, no per-module granularity, no JIT-on-nav), Expo Updates (similar), Android A/B partition updates (slot pattern only, no in-runtime bytecode).

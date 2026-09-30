@@ -1,4 +1,12 @@
 #!/usr/bin/env sh
+# Mob pre-push gate (.githooks/pre-push: format, credo, compile, plus tests
+# when mix.exs changed). git's ref list arrives on stdin; buffer it so both
+# the gate and the beads section below each see the full list.
+_mob_refs=$(cat)
+printf '%s\n' "$_mob_refs" | "$(git rev-parse --show-toplevel)/.githooks/pre-push" "$@" || exit $?
+exec 0<<MOB_REFS
+$_mob_refs
+MOB_REFS
 # --- BEGIN BEADS INTEGRATION v1.2.2 ---
 # This section is managed by beads. Do not remove these markers.
 if command -v bd >/dev/null 2>&1; then

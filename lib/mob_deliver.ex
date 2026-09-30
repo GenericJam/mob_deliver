@@ -73,14 +73,4 @@ defmodule MobDeliver do
   rationale on why these are punted and what wire-format hooks are
   already in place to let each one land as an additive change later.
   """
-
-  @doc """
-  Public API surface — placeholder until the child issues land.
-
-  * `MobDeliver.resolve/1` — cache-miss fetch for the router.
-  * `MobDeliver.check/0` — force a manifest refresh + prefetch.
-  * `MobDeliver.installed/0` — the current locally-active manifest.
-  * `MobDeliver.rollback/0` — revert to the last-known-good tree.
-  """
-  def _spec, do: :placeholder
 end

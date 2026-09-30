@@ -84,9 +84,9 @@ mix compile --warnings-as-errors
 mix test
 ```
 
-Pre-push hook (`.githooks/pre-push`, `git config core.hooksPath .githooks` once per clone) runs the above on every push.
+Pre-push gate: `.githooks/pre-push` (format, credo, compile; plus tests when `mix.exs` changed). It's invoked from the beads pre-push shim, so set `git config core.hooksPath .beads/hooks` once per clone — **not** `.githooks`, which would silently disable the beads hooks.
 
-Not yet published to Hex. Kept git-local per Kevin's `feedback_git_local_during_scaffold` — GH Actions private-repo billing means avoiding push until the publish gate is met.
+Public on GitHub (`GenericJam/mob_deliver`); CI in `.github/workflows/test.yml`. Not yet published to Hex.
 
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:6cd5cc61 -->
 ## Beads Issue Tracker

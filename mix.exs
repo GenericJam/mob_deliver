@@ -61,9 +61,11 @@ defmodule MobDeliver.MixProject do
       # Plugin manifest validator lives here. Dev/test only — the host app
       # supplies mob_dev at build time.
       {:mob_dev, "~> 0.6", only: [:dev, :test], runtime: false},
-      # Code quality — same bar as mob + siblings.
+      # Code quality — Credo + ex_slop (AI-pattern checks) + jump_credo_checks,
+      # mirroring mob core's pre-commit gate.
       {:credo, "~> 1.7", only: [:dev, :test], runtime: false},
       {:ex_slop, "~> 0.4", only: [:dev, :test], runtime: false},
+      {:jump_credo_checks, "~> 0.1.0", only: [:dev, :test], runtime: false},
       # Docs.
       {:ex_doc, "~> 0.34", only: :dev, runtime: false}
     ]

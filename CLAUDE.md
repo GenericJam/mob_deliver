@@ -14,7 +14,7 @@ mix credo --strict   # includes ExSlop + jump_credo_checks
 mix compile --warnings-as-errors
 ```
 
-Not yet published to Hex; kept git-local while the scaffold + child issues land per `feedback_git_local_during_scaffold`.
+Public on GitHub (`GenericJam/mob_deliver`); not yet published to Hex. Pre-push hook setup: see AGENTS.md "Pre-commit + release".
 
 Releases (once ready): mix.exs version bump on master triggers `.github/workflows/release.yml` (tag + GitHub Release + Hex publish). See `~/code/mob/RELEASE.md` for the trigger model; do NOT bump versions without explicit permission.
 

@@ -6,8 +6,8 @@ a website."
 
 > **Status: v0.1.0-dev.** Design + scope + wire format v1 are pinned in
 > [`decisions/2026-09-19-scope-and-wire-format.md`](decisions/2026-09-19-scope-and-wire-format.md).
-> The plugin scaffold + module surface is in place; the child implementation
-> issues track everything else. No published Hex release yet.
+> Implementation is tracked as child issues of the `mob_deliver-c67` beads
+> epic. Not yet usable in an app; no Hex release yet.
 
 ## What it does
 
@@ -96,6 +96,28 @@ config :mob_deliver,
   channel: :production
 ```
 
+## Development
+
+```bash
+git clone https://github.com/GenericJam/mob_deliver && cd mob_deliver
+mix deps.get
+git config core.hooksPath .beads/hooks   # beads hooks + the mob pre-push gate
+```
+
+Gate (CI runs the same on every push and PR):
+
+```bash
+mix format --check-formatted
+mix credo --strict
+mix compile --warnings-as-errors
+mix test
+```
+
+Issues are tracked with [beads](https://github.com/gastownhall/beads):
+`bd ready` lists unblocked work, `bd list --parent mob_deliver-c67` the v1 epic.
+Read [`AGENTS.md`](AGENTS.md) and the scope ADR before changing anything
+wire-format-adjacent.
+
 ## License
 
-MIT.
+MIT — see [`LICENSE`](LICENSE).
