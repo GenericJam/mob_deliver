@@ -32,12 +32,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
   Rejections recorded by 0.1.0 keep refusing their exact manifest on every
   version; the same modules re-published get one more probation launch
   there.
-- A launch that boots into the forced-update screen no longer ends the
-  booted update's probation (none of its screens ran) and doesn't count as
-  a failed launch: the update stays on probation until the app's real root
-  renders.
+- A frame of the forced-update screen no longer proves the booted update
+  (none of its screens ran), whether the launch booted into it or was reset
+  to it before the app's first frame: proof is the first committed frame of
+  an app screen, judged by the screen that actually rendered (mob's
+  `:after_first_render` passes it and can be re-armed). Such a launch
+  doesn't count as a failed one either; if the gate opens in that session,
+  the launch counts again before the root mounts, so a crash there still
+  rolls back.
 - Installs also prefetch the delivered modules that code loaded on the
-  device calls (e.g. a bundled screen calling a delivered helper), so the
+  device calls (a bundled screen calling a delivered helper, or a
+  delivered module from the store calling a newly delivered one), so the
   probation launch doesn't download them while its first screen mounts.
 - Timed update checks run only while the app is in the foreground
   (Android blocks a backgrounded app's network). The plugin's new
@@ -54,7 +59,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
   switches to the update screen without waiting for the next navigation,
   and a lifted gate returns an app showing the update screen to the root
   it asked `root_screen/2` for, also right after a cold boot that started
-  on the update screen.
+  on the update screen. One process applies changes in order against the
+  current gate, and retries while the router is busy.
 - `MobDeliver.UpdateRequiredScreen` uses theme colour tokens (readable in
   dark and light themes) and, without `:store_url`, tells users to update
   from their store instead of showing no action at all.

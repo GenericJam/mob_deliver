@@ -116,14 +116,23 @@ defmodule MobDeliver.Watchdog do
   def mark_stable(server), do: GenServer.call(server, :mark_stable)
 
   @doc """
-  First idle without proof: the first screen this launch showed was the
-  forced-update screen, so none of the booted update's screens ran. Sets
-  `first_idle?/1`, and the booted update stays unproven (installs keep
-  waiting) with its launch not counted: the next launch is a probation
-  launch again, not a failed one.
+  A frame of the forced-update screen, before any of the booted update's
+  screens ran: nothing is proven. The booted update stays unproven
+  (installs keep waiting), its launch isn't counted (a launch that only
+  ever shows the update screen and then ends is followed by another
+  probation launch, not a rollback), and `first_idle?/1` isn't set.
+  `resume_probation/1` counts the launch again once its screens run.
   """
   @spec mark_idle_unproven(server()) :: :ok | {:error, term()}
   def mark_idle_unproven(server), do: GenServer.call(server, :mark_idle_unproven)
+
+  @doc """
+  The booted update's screens are about to run in this session after all
+  (the gate opened after an update-screen launch): count the launch again,
+  so dying before the app's root renders rolls the update back as usual.
+  """
+  @spec resume_probation(server()) :: :ok | {:error, term()}
+  def resume_probation(server), do: GenServer.call(server, :resume_probation)
 
   @doc "Whether this VM reached first idle (`mark_stable/1`); survives a restart of the watchdog."
   @spec first_idle?(server()) :: boolean()
@@ -160,10 +169,9 @@ defmodule MobDeliver.Watchdog do
   @impl true
   def handle_call(:first_idle?, _from, s), do: {:reply, s.first_idle, s}
 
-  def handle_call(idle, from, %{first_idle: false} = s)
-      when idle in [:mark_stable, :mark_idle_unproven] do
+  def handle_call(:mark_stable, from, %{first_idle: false} = s) do
     :persistent_term.put(s.idle_key, true)
-    handle_call(idle, from, %{s | first_idle: true})
+    handle_call(:mark_stable, from, %{s | first_idle: true})
   end
 
   def handle_call(request, from, %{state: nil} = s) do
@@ -206,6 +214,17 @@ defmodule MobDeliver.Watchdog do
       # If this can't be written the launch still counts, and the next one
       # rolls the update back: fail closed.
       case write(s, %{s.state | boots: 0}) do
+        {:ok, s} -> {:reply, :ok, s}
+        {error, s} -> reply(error_reply(error, s))
+      end
+    else
+      {:reply, :ok, s}
+    end
+  end
+
+  def handle_call(:resume_probation, _from, s) do
+    if booted_armed?(s) and s.state.boots == 0 do
+      case write(s, %{s.state | boots: 1}) do
         {:ok, s} -> {:reply, :ok, s}
         {error, s} -> reply(error_reply(error, s))
       end
@@ -270,6 +289,11 @@ defmodule MobDeliver.Watchdog do
       )
   end
 
+  # Written by an unreleased build (b6904ba) as `rejected_code`: the digest
+  # of the whole module map. Still refuses that exact map on its version.
+  defp refuses?(%{modules_digest: digest}, _id, manifest),
+    do: modules_digest(manifest) == digest
+
   # A manifest that introduced nothing: its crash wasn't its code, so only
   # that exact manifest is refused (an empty suspect set would match all).
   defp refuses?(%{suspects: suspects, id: rejected_id}, id, _manifest) when suspects == %{},
@@ -277,6 +301,11 @@ defmodule MobDeliver.Watchdog do
 
   defp refuses?(%{suspects: suspects}, _id, %Manifest{modules: modules}),
     do: Enum.all?(suspects, fn {key, sha} -> Map.get(modules, key) == sha end)
+
+  # Canonical JSON of the module map, hashed: what b6904ba stored.
+  defp modules_digest(%Manifest{modules: modules}) do
+    Base.encode16(:crypto.hash(:sha256, Manifest.signing_payload(modules)), case: :lower)
+  end
 
   # Refused only on another app version: that version's failure says
   # nothing about this binary.
@@ -439,8 +468,11 @@ defmodule MobDeliver.Watchdog do
            armed: armed,
            boots: boots,
            rejected: strings(rejected),
-           # Absent in state written by 0.1.0.
-           rejections: rejections(Map.get(state, :rejections, [])),
+           # Absent in state written by 0.1.0; `rejected_code` is b6904ba's
+           # format, carried over so a rollback it recorded still completes.
+           rejections:
+             rejections(Map.get(state, :rejections, [])) ++
+               legacy_code_rejections(Map.get(state, :rejected_code, [])),
            notice: notice
          }}
 
@@ -462,13 +494,31 @@ defmodule MobDeliver.Watchdog do
 
   # The state file is untrusted input: malformed entries are dropped.
   defp rejections(list) when is_list(list) do
-    for %{suspects: suspects, app_version: version, id: id} <- list,
-        is_map(suspects) and is_binary(id) and (is_binary(version) or is_nil(version)),
-        Enum.all?(suspects, fn {key, sha} -> is_binary(key) and is_binary(sha) end),
-        do: %{suspects: suspects, app_version: version, id: id}
+    Enum.flat_map(list, fn
+      %{suspects: suspects, app_version: version, id: id}
+      when is_map(suspects) and is_binary(id) and (is_binary(version) or is_nil(version)) ->
+        if Enum.all?(suspects, fn {key, sha} -> is_binary(key) and is_binary(sha) end),
+          do: [%{suspects: suspects, app_version: version, id: id}],
+          else: []
+
+      %{modules_digest: digest, app_version: version}
+      when is_binary(digest) and (is_binary(version) or is_nil(version)) ->
+        [%{modules_digest: digest, app_version: version}]
+
+      _malformed ->
+        []
+    end)
   end
 
   defp rejections(_), do: []
+
+  defp legacy_code_rejections(list) when is_list(list) do
+    for {digest, version} <- list,
+        is_binary(digest) and (is_binary(version) or is_nil(version)),
+        do: %{modules_digest: digest, app_version: version}
+  end
+
+  defp legacy_code_rejections(_), do: []
 
   # Memory follows disk: on failure the old state stays in effect.
   defp write(s, state) do

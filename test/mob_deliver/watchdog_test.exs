@@ -80,7 +80,7 @@ defmodule MobDeliver.WatchdogTest do
       gated = launch(ctx)
       assert gated.outcome == {:ok, :armed}
       assert Watchdog.mark_idle_unproven(gated.watchdog) == :ok
-      assert Watchdog.first_idle?(gated.watchdog)
+      refute Watchdog.first_idle?(gated.watchdog)
       # Still unproven: no second install meanwhile.
       assert try_install(ctx, gated, "next") == {:ok, :deferred}
 
@@ -93,6 +93,35 @@ defmodule MobDeliver.WatchdogTest do
       rolled = launch(ctx)
       assert rolled.outcome == {:ok, :rolled_back}
       assert Store.active_id(rolled.store) == good
+    end
+
+    test "when the gate opens mid-launch, the update's screens are on probation again until the root renders",
+         ctx do
+      good = stable_install(ctx, "good")
+      install(ctx, launch(ctx), "update")
+
+      gated = launch(ctx)
+      :ok = Watchdog.mark_idle_unproven(gated.watchdog)
+      # The gate opens; the app's root is about to mount — and crashes.
+      assert Watchdog.resume_probation(gated.watchdog) == :ok
+
+      rolled = launch(ctx)
+      assert rolled.outcome == {:ok, :rolled_back}
+      assert Store.active_id(rolled.store) == good
+    end
+
+    test "after the gate opens mid-launch, the root's frame proves the update", ctx do
+      stable_install(ctx, "good")
+      install(ctx, launch(ctx), "update")
+
+      gated = launch(ctx)
+      :ok = Watchdog.mark_idle_unproven(gated.watchdog)
+      :ok = Watchdog.resume_probation(gated.watchdog)
+      :ok = Watchdog.mark_stable(gated.watchdog)
+
+      assert Watchdog.first_idle?(gated.watchdog)
+      # Proven: the next install isn't deferred.
+      assert try_install(ctx, gated, "next") == {:ok, :installed}
     end
 
     test "an update whose first boot dies before first idle is rolled back on the next boot",
@@ -227,6 +256,39 @@ defmodule MobDeliver.WatchdogTest do
       # The same signed manifest, unchanged.
       updated_app = launch(ctx, app_version: "1.1")
       assert try_install(ctx, updated_app, "bad") == {:ok, :installed}
+    end
+
+    test "a rollback recorded in the earlier code-id format that didn't finish still finishes, and stays in force",
+         ctx do
+      good = stable_install(ctx, "good")
+      install(ctx, launch(ctx), "bad")
+      {:ok, manifest} = ctx.verify.(body(ctx, "bad"))
+
+      digest =
+        Base.encode16(:crypto.hash(:sha256, Manifest.signing_payload(manifest.modules)),
+          case: :lower
+        )
+
+      File.write!(
+        Path.join(ctx.root, "watchdog"),
+        :erlang.term_to_binary(%{
+          armed: nil,
+          boots: 0,
+          rejected: [],
+          rejected_code: [{digest, "1.0"}],
+          notice: nil
+        })
+      )
+
+      app = launch(ctx)
+      assert app.outcome == {:ok, :rolled_back}
+      assert Store.active_id(app.store) == good
+
+      assert try_install(ctx, app, "bad", %{"issued_at" => "2026-10-02T00:00:00Z"}) ==
+               {:ok, :rejected}
+
+      # Kept across the watchdog's own writes.
+      assert try_install(ctx, launch(ctx), "bad") == {:ok, :rejected}
     end
 
     test "a store update after a rejection was recorded but before the rollback finished puts the manifest on probation",

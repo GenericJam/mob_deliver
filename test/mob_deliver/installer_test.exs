@@ -281,6 +281,39 @@ defmodule MobDeliver.InstallerTest do
     refute Store.has_blob?(ctx.store, sha("later screen"))
   end
 
+  test "a helper newly delivered to a delivered caller loaded from the store is prefetched",
+       ctx do
+    n = ctx.n
+    helper = :"Elixir.MobDeliverInstall#{n}.NewHelper"
+
+    {:module, caller, caller_bin, _} =
+      Module.create(
+        :"Elixir.MobDeliverInstall#{n}.StoredCaller",
+        quote(do: def(run, do: unquote(helper).go())),
+        Macro.Env.location(__ENV__)
+      )
+
+    # Delivered and loaded as on a device: from blobs/<sha>, no .beam suffix.
+    active = body(ctx, [{Manifest.module_key(caller), caller_bin}])
+    activate!(ctx, active)
+    :ok = Store.put_blob(ctx.store, sha(caller_bin), caller_bin)
+    :code.purge(caller)
+    path = Store.blob_path(ctx.store, sha(caller_bin))
+    {:module, ^caller} = :code.load_binary(caller, String.to_charlist(path), caller_bin)
+
+    # Next release: the caller is unchanged, the helper is new.
+    update =
+      body(ctx, [
+        {Manifest.module_key(caller), caller_bin},
+        {Manifest.module_key(helper), "helper"}
+      ])
+
+    blobs = %{sha(caller_bin) => caller_bin, sha("helper") => "helper"}
+
+    assert Installer.check(opts(ctx, update, blobs)) == {:ok, :installed}
+    assert Store.has_blob?(ctx.store, sha("helper"))
+  end
+
   test "keys of modules this device has never heard of don't create atoms", ctx do
     unheard_of = "MobDeliverUnheardOf#{System.unique_integer([:positive])}xyz.Screen"
     update = body(ctx, [{unheard_of, "bytes"}])

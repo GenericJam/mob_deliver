@@ -163,7 +163,8 @@ defmodule MobDeliver.Gate do
       table: table(name),
       store: Keyword.get(opts, :store, Store),
       app_version: Keyword.get_lazy(opts, :app_version, &Config.app_version/0),
-      on_change: Keyword.get(opts, :on_change, &MobDeliver.GateNavigation.run(status: &1))
+      on_change:
+        Keyword.get(opts, :on_change, fn _status -> MobDeliver.GateNavigation.request() end)
     }
 
     load(s, Keyword.get_lazy(opts, :verify, &MobDeliver.Boot.verifier/0))

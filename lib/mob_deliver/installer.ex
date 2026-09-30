@@ -128,10 +128,14 @@ defmodule MobDeliver.Installer do
     end
   end
 
+  # The loaded file's bytes, not its name: :beam_lib appends ".beam" to a
+  # filename, and delivered modules are loaded from blobs/<sha>.
   defp imports_from_file(file) do
-    case :beam_lib.chunks(file, [:imports]) do
-      {:ok, {_module, [imports: imports]}} -> Enum.map(imports, &elem(&1, 0))
-      {:error, :beam_lib, _} -> []
+    with {:ok, binary} <- File.read(file),
+         {:ok, {_module, [imports: imports]}} <- :beam_lib.chunks(binary, [:imports]) do
+      Enum.map(imports, &elem(&1, 0))
+    else
+      _ -> []
     end
   end
 

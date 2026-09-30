@@ -24,7 +24,36 @@ defmodule MobDeliver.GateNavigationTest do
     def navigation(_), do: stack(:home, root: MobDeliver.GateNavigationTest.HomeScreen)
   end
 
-  @required {:required, %{}}
+  # Answers the watchdog call a release makes, and reports it.
+  defmodule FakeWatchdog do
+    use GenServer
+    def start_link(test_pid), do: GenServer.start_link(__MODULE__, test_pid)
+    @impl true
+    def init(test_pid), do: {:ok, test_pid}
+    @impl true
+    def handle_call(:resume_probation, _from, test_pid) do
+      send(test_pid, :probation_resumed)
+      {:reply, :ok, test_pid}
+    end
+  end
+
+  # A router that's busy (doesn't answer) for its first `busy` queries.
+  defmodule BusyRouter do
+    use GenServer
+    def start_link(busy), do: GenServer.start_link(__MODULE__, busy)
+    @impl true
+    def init(busy), do: {:ok, %{busy: busy, current: MobDeliver.GateNavigationTest.HomeScreen}}
+    @impl true
+    def handle_call(:get_current_module, _from, %{busy: busy} = s) when busy > 0 do
+      Process.sleep(150)
+      {:reply, s.current, %{s | busy: busy - 1}}
+    end
+
+    def handle_call(:get_current_module, _from, s), do: {:reply, s.current, s}
+
+    def handle_call({:navigate, {:reset, dest, _, _, :all}}, _from, s),
+      do: {:reply, :ok, %{s | current: dest}}
+  end
 
   setup do
     stop(Process.whereis(Mob.Nav.Registry))
@@ -32,13 +61,17 @@ defmodule MobDeliver.GateNavigationTest do
     {:ok, router} = Mob.Screen.start_link(HomeScreen, %{})
     Process.unlink(registry)
     Process.unlink(router)
+    {:ok, status} = Agent.start_link(fn -> :ok end)
+    {:ok, watchdog} = FakeWatchdog.start_link(self())
+    GateNavigation.put_root(HomeScreen, HomeScreen, UpdateRequiredScreen)
 
     on_exit(fn ->
+      :persistent_term.erase({MobDeliver, :root})
       stop(router)
       stop(registry)
     end)
 
-    %{router: router}
+    %{router: router, status: status, watchdog: watchdog}
   end
 
   defp stop(nil), do: :ok
@@ -49,58 +82,95 @@ defmodule MobDeliver.GateNavigationTest do
     :exit, _already_gone -> :ok
   end
 
-  defp current(router), do: Mob.Router.get_current_module(router)
+  defp navigation(ctx, extra \\ []) do
+    status = ctx.status
+    router = Keyword.get(extra, :router, ctx.router)
 
-  defp push(router, screen),
-    do: :ok = GenServer.call(router, {:navigate, {:push, screen, %{}}})
+    start_supervised!(
+      {GateNavigation,
+       [
+         name: :"gate_nav_#{System.unique_integer([:positive])}",
+         router: fn -> router end,
+         status: fn -> Agent.get(status, & &1) end,
+         watchdog: ctx.watchdog
+       ] ++ extra}
+    )
+  end
+
+  defp gate(ctx, status), do: Agent.update(ctx.status, fn _ -> status end)
+
+  defp current(router), do: GenServer.call(router, :get_current_module)
+
+  defp eventually(fun, tries \\ 100) do
+    if fun.() or tries == 0, do: fun.(), else: Process.sleep(10) && eventually(fun, tries - 1)
+  end
 
   test "a gate that becomes required replaces the whole navigation with the update screen",
-       %{router: router} do
-    push(router, DetailScreen)
+       ctx do
+    :ok = GenServer.call(ctx.router, {:navigate, {:push, DetailScreen, %{}}})
+    nav = navigation(ctx)
 
-    assert GateNavigation.reconcile(router: router, status: @required, root: HomeScreen) ==
-             :locked
+    gate(ctx, {:required, %{}})
+    GateNavigation.request(nav)
 
-    assert current(router) == UpdateRequiredScreen
-    assert Mob.Router.get_nav_history(router) == []
+    assert eventually(fn -> current(ctx.router) == UpdateRequiredScreen end)
+    assert Mob.Router.get_nav_history(ctx.router) == []
   end
 
-  test "a gate that opens releases the update screen to the app's root", %{router: router} do
-    GateNavigation.reconcile(router: router, status: @required, root: HomeScreen)
+  test "a gate that opens releases the update screen to the app's root, resuming probation",
+       ctx do
+    nav = navigation(ctx)
+    gate(ctx, {:required, %{}})
+    GateNavigation.request(nav)
+    assert eventually(fn -> current(ctx.router) == UpdateRequiredScreen end)
 
-    assert GateNavigation.reconcile(router: router, status: :ok, root: HomeScreen) == :released
-    assert current(router) == HomeScreen
-    assert Mob.Router.get_nav_history(router) == []
+    gate(ctx, {:recommended, %{}})
+    GateNavigation.request(nav)
 
-    GateNavigation.reconcile(router: router, status: @required, root: HomeScreen)
-
-    assert GateNavigation.reconcile(router: router, status: {:recommended, %{}}, root: HomeScreen) ==
-             :released
+    assert eventually(fn -> current(ctx.router) == HomeScreen end)
+    assert_receive :probation_resumed
   end
 
-  test "navigation that already matches the gate is left alone", %{router: router} do
-    push(router, DetailScreen)
+  test "changes are applied in order against the gate as it is now, never a stale one", ctx do
+    nav = navigation(ctx)
 
-    assert GateNavigation.reconcile(router: router, status: :ok, root: HomeScreen) == :noop
-    assert current(router) == DetailScreen
+    # Required, then lifted before anything ran: the user ends up on the root.
+    gate(ctx, {:required, %{}})
+    GateNavigation.request(nav)
+    gate(ctx, :ok)
+    GateNavigation.request(nav)
 
-    GateNavigation.reconcile(router: router, status: @required, root: HomeScreen)
-    assert GateNavigation.reconcile(router: router, status: @required, root: HomeScreen) == :noop
+    Process.sleep(100)
+    assert current(ctx.router) == HomeScreen
   end
 
-  test "without a known root the update screen stays, logged", %{router: router} do
-    GateNavigation.reconcile(router: router, status: @required, root: HomeScreen)
+  test "a router too busy to answer is asked again, not given up on", ctx do
+    {:ok, busy} = BusyRouter.start_link(2)
+    nav = navigation(ctx, router: busy, call_timeout: 50, retry_ms: 20)
+
+    gate(ctx, {:required, %{}})
+    GateNavigation.request(nav)
+
+    assert eventually(fn ->
+             GenServer.call(busy, :get_current_module, 1_000) == UpdateRequiredScreen
+           end)
+  end
+
+  test "without a known root the update screen stays, logged", ctx do
+    nav = navigation(ctx)
+    gate(ctx, {:required, %{}})
+    GateNavigation.request(nav)
+    assert eventually(fn -> current(ctx.router) == UpdateRequiredScreen end)
+    :persistent_term.erase({MobDeliver, :root})
 
     log =
       ExUnit.CaptureLog.capture_log(fn ->
-        assert GateNavigation.reconcile(router: router, status: :ok, root: nil) == :noop
+        gate(ctx, :ok)
+        GateNavigation.request(nav)
+        Process.sleep(100)
       end)
 
     assert log =~ "MobDeliver.root_screen/2"
-    assert current(router) == UpdateRequiredScreen
-  end
-
-  test "without a router (before the root screen starts) nothing happens" do
-    assert GateNavigation.reconcile(router: nil, status: @required, root: HomeScreen) == :noop
+    assert current(ctx.router) == UpdateRequiredScreen
   end
 end

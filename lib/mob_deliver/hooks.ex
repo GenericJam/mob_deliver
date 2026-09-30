@@ -56,22 +56,36 @@ defmodule MobDeliver.Hooks do
   end
 
   @doc false
-  # The root screen's first frame. If it was the update screen (the app
-  # booted under a required gate), none of the booted update's screens ran:
-  # that's first idle without proof. Then bring navigation in line with the
-  # gate, which may have changed before the router existed.
-  @spec first_render(keyword()) :: :ok | {:error, term()}
-  def first_render(opts \\ []) do
+  # A committed frame of `screen` (mob calls this for the VM's first frame,
+  # and again for the next one each time it's re-armed). The update screen's
+  # frame proves nothing: none of the booted update's screens ran. Then the
+  # hook is re-armed so the next frame — eventually the app's, once the gate
+  # lets it through — is judged too. Any other screen's frame is first idle.
+  # `nil` (mob couldn't tell, mid hot code push) proves nothing either.
+  # Either way navigation is brought in line with the gate, which may have
+  # changed before the router existed.
+  @spec first_render(module() | nil, keyword()) :: :ok | {:error, term()}
+  def first_render(screen, opts \\ []) do
     watchdog = Keyword.get(opts, :watchdog, MobDeliver.Watchdog)
-    root = Keyword.get_lazy(opts, :root, &MobDeliver.GateNavigation.root/0)
-    reconcile = Keyword.get(opts, :reconcile, &MobDeliver.GateNavigation.run/0)
+
+    update_screen =
+      Keyword.get_lazy(opts, :update_screen, &MobDeliver.GateNavigation.update_screen/0)
+
+    rearm = Keyword.get(opts, :rearm, &Mob.Router.Hooks.rearm_first_render/0)
+    reconcile = Keyword.get(opts, :reconcile, &MobDeliver.GateNavigation.request/0)
 
     result =
-      case root do
-        %{booted: booted, requested: requested} when booted != requested ->
-          MobDeliver.Watchdog.mark_idle_unproven(watchdog)
+      cond do
+        screen == update_screen ->
+          result = MobDeliver.Watchdog.mark_idle_unproven(watchdog)
+          rearm.()
+          result
 
-        _ ->
+        screen == nil ->
+          rearm.()
+          :ok
+
+        true ->
           MobDeliver.Watchdog.mark_stable(watchdog)
       end
 

@@ -96,7 +96,7 @@ defmodule MobDeliver.HooksTest do
              {:reset, MobDeliver.UpdateRequiredScreen}
   end
 
-  test "a first frame of the update screen doesn't end the booted update's probation; the app's root does",
+  test "a frame of the update screen doesn't end the booted update's probation and asks for the next frame; the app's own frame does",
        ctx do
     {body, manifest} = signed(ctx, %{})
     {:ok, :installed} = Watchdog.install(ctx.opts[:watchdog], body, manifest, nil)
@@ -109,14 +109,24 @@ defmodule MobDeliver.HooksTest do
     )
 
     {:ok, :armed} = Watchdog.on_boot(booted, ctx.verify)
+    test_pid = self()
 
-    no_reconcile = fn -> :ok end
-    update_root = %{requested: MyApp.Home, booted: MobDeliver.UpdateRequiredScreen}
-    assert Hooks.first_render(watchdog: booted, root: update_root, reconcile: no_reconcile) == :ok
+    opts = [
+      watchdog: booted,
+      update_screen: MobDeliver.UpdateRequiredScreen,
+      rearm: fn -> send(test_pid, :rearmed) end,
+      reconcile: fn -> :ok end
+    ]
+
+    # Whatever root_screen/2 picked: this frame is the update screen's.
+    assert Hooks.first_render(MobDeliver.UpdateRequiredScreen, opts) == :ok
+    assert_received :rearmed
     refute Watchdog.ready_to_install?(booted)
+    refute Watchdog.first_idle?(booted)
 
-    app_root = %{requested: MyApp.Home, booted: MyApp.Home}
-    assert Hooks.first_render(watchdog: booted, root: app_root, reconcile: no_reconcile) == :ok
+    assert Hooks.first_render(MyApp.Home, opts) == :ok
+    refute_received :rearmed
     assert Watchdog.ready_to_install?(booted)
+    assert Watchdog.first_idle?(booted)
   end
 end
