@@ -45,7 +45,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
   `min_app_version` the app gets `{:recommended, _}` until
   `force_update_after`, then boots into the update screen and `resolve/1`
   refuses. Follows the newest verified manifest (replay-safe), configured
-  via `:app_version` and `:store_url`.
+  via `:store_url` and the app's version — `:app_version` config, or
+  `Mob.Device.app_version()` when mob has it.
 - Blob cleanup at boot (`MobDeliver.Store.gc/1`): blobs referenced by
   neither the active nor the previous manifest, and temp files from
   interrupted writes, are deleted before update checks start.

@@ -97,7 +97,8 @@ config :mob_deliver,
   app: "com.example.myapp",
   endpoint: "https://updates.myapp.com",
   channel: :production,
-  # The native app version (mob can't read it at runtime) and store page,
+  # The store page, and this binary's version (read from the app bundle
+  # via Mob.Device.app_version/0 on mob that has it; set it on older mob),
   # for the forced-update window.
   app_version: "1.4.0",
   store_url: "https://apps.apple.com/app/id000000000",

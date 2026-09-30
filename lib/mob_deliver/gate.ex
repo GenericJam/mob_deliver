@@ -16,8 +16,9 @@ defmodule MobDeliver.Gate do
   re-verified at boot, so it holds offline, and an older signed manifest
   (lower `issued_at`) can't replace a newer one to lift the gate.
 
-  The app's own version comes from `config :mob_deliver, :app_version`
-  (mob has no runtime accessor for the native version). If it — or the
+  The app's own version is `config :mob_deliver, :app_version` if set,
+  else the native store version from `Mob.Device.app_version()` (mob with
+  that accessor). If it — or the
   floor — isn't a dotted numeric version, the gate stays open and logs
   why: it's an update prompt, not a security boundary.
   """
@@ -57,7 +58,7 @@ defmodule MobDeliver.Gate do
       [{:latest, manifest}] ->
         evaluate(
           manifest,
-          Keyword.get_lazy(opts, :app_version, fn -> Config.get(:app_version) end),
+          Keyword.get_lazy(opts, :app_version, &Config.app_version/0),
           Keyword.get_lazy(opts, :now, &DateTime.utc_now/0)
         )
 

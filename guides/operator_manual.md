@@ -46,7 +46,7 @@ config :mob_deliver,
   app: "com.example.myapp",               # must match what you publish
   channel: :production,
   endpoint: "https://example.com/deliver",
-  app_version: "1.4.0",                   # this binary's store version
+  app_version: "1.4.0",                   # optional with mob's Mob.Device.app_version/0
   store_url: "https://apps.apple.com/app/id000000000"
 ```
 

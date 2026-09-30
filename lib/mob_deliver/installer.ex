@@ -60,7 +60,7 @@ defmodule MobDeliver.Installer do
     |> Keyword.put_new(:gate, Gate)
     |> Keyword.put_new(:single_flight, SingleFlight)
     |> Keyword.put_new_lazy(:client_opts, &Config.client_opts/0)
-    |> Keyword.put_new_lazy(:app_version, fn -> Config.get(:app_version) end)
+    |> Keyword.put_new_lazy(:app_version, &Config.app_version/0)
   end
 
   # Everything the next boot will load is on disk before the slot switches:

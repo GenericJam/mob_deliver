@@ -40,6 +40,27 @@ defmodule MobDeliver.Config do
     end
   end
 
+  # This binary's store version, for the update gate: `config :mob_deliver,
+  # :app_version` if set, else `Mob.Device.app_version/0` (mob with the
+  # native accessor), else `nil`, which leaves the gate open.
+  @spec app_version() :: String.t() | nil
+  def app_version, do: get(:app_version) || native_app_version()
+
+  @device Mob.Device
+
+  # Called dynamically: the accessor is newer than the mob this compiles
+  # against, and off-device its NIF isn't loaded.
+  defp native_app_version do
+    if Code.ensure_loaded?(@device) and function_exported?(@device, :app_version, 0) do
+      case apply(@device, :app_version, []) do
+        version when is_binary(version) and version != "" -> version
+        _ -> nil
+      end
+    end
+  catch
+    _, _ -> nil
+  end
+
   @spec app() :: String.t() | nil
   def app, do: get(:app)
 

@@ -189,7 +189,8 @@ defmodule MobDeliver do
   The forced-update window for this app version right now (see
   `MobDeliver.Gate`): `:ok`, `{:recommended, info}` — show an "update
   available" banner that calls `open_store/0` — or `{:required, info}`.
-  Needs `config :mob_deliver, app_version: "1.4.0"` (and `:store_url`).
+  Needs `:store_url`; the app's version comes from mob's native accessor
+  (`Mob.Device.app_version()`) or `config :mob_deliver, app_version: "1.4.0"`.
   """
   @spec update_status() :: MobDeliver.Gate.status()
   def update_status, do: MobDeliver.Gate.status()
