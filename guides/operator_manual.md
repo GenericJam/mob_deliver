@@ -89,10 +89,13 @@ Where screens live decides how they ship: modules under `lib/` are compiled
 into the store build; modules under `mobile/` (outside `elixirc_paths`) are
 never bundled and only reach devices through publishing. Navigating to a
 `mobile/` screen fetches it on first use, including one published after
-the device's last update: a navigation to a module the device doesn't
-know asks the server for its newest manifest (at most once per
-`:refresh_interval`, default 30s) and takes just that screen's modules
-from it.
+the device's last update: once the app's first screen has rendered, a
+navigation to a module the device doesn't know asks the server for its
+newest manifest (at most once per `:refresh_interval`, default 30s) and
+takes just that screen's modules from it. During startup (before that
+first frame) only installed content runs, so a screen the startup flow
+needs must be in an installed manifest (it is after the next update
+check).
 
 ## 3. Delivery endpoint
 
@@ -226,11 +229,11 @@ restarts and offline launches; an older signed manifest can't lift it.
   the same app version, whatever the `issued_at` or update window, so
   re-running the publish on the same source does nothing for them. Any
   change that changes a compiled `.beam` (not a comment-only edit) is new
-  content; so is adding or removing a module. After a store
-  update of the app, devices give previously rejected content a fresh
-  probation. Devices that rejected content under mob_deliver 0.1.0 only
-  refuse that exact manifest: the same modules re-published get one more
-  probation launch there.
+  content; so is adding or removing a module. After a store update of the
+  app, devices give previously rejected content — even the unchanged
+  manifest — a fresh probation. Devices that rejected content under
+  mob_deliver 0.1.0 refuse that exact manifest on every app version; the
+  same modules re-published get one more probation launch there.
 
 ## 7. Troubleshooting
 

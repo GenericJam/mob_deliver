@@ -31,6 +31,10 @@ defmodule MobDeliver.ResolverTest do
       id: watchdog
     )
 
+    # Most tests run after the root screen's first frame (the router hook's
+    # mark_stable); the refresh tests before it start their own watchdog.
+    :ok = Watchdog.mark_stable(watchdog)
+
     start_supervised!({Refresh, name: refresh}, id: refresh)
     # What the server's POST /manifest answers (nil: 404).
     latest = start_supervised!({Agent, fn -> nil end})
@@ -344,6 +348,38 @@ defmodule MobDeliver.ResolverTest do
       assert manifest_fetches() == 1
     end
 
+    test "before the root screen's first frame nothing is fetched for it: :not_found", ctx do
+      {mod, bin} = beam("defmodule MobDeliverJit#{ctx.id}.Early do def hi, do: :early end")
+      publish_latest(ctx, [{mod, bin}])
+      booting = :"#{ctx.watchdog}_booting"
+
+      start_supervised!({Watchdog, name: booting, store: ctx.store, app_version: "2.0.0"},
+        id: booting
+      )
+
+      opts = Keyword.put(serving(ctx, %{sha(bin) => bin}), :watchdog, booting)
+
+      assert Resolver.resolve(mod, opts) == {:error, :not_found}
+      refute :code.is_loaded(mod)
+      assert manifest_fetches() == 0
+
+      :ok = Watchdog.mark_stable(booting)
+      assert Resolver.resolve(mod, opts) == :ok
+    end
+
+    test "a refreshed manifest that puts this app past its forced-update deadline gates at once",
+         ctx do
+      opts = publish(ctx, [], %{})
+
+      publish_latest(ctx, [], %{
+        "min_app_version" => "3.0",
+        "force_update_after" => "2026-01-01T00:00:00Z"
+      })
+
+      assert Resolver.resolve(:"Elixir.MobDeliverJit#{ctx.id}.Anything", opts) ==
+               {:error, :update_required}
+    end
+
     test "the server's manifest isn't used if this app version is below its floor", ctx do
       {mod, bin} = beam("defmodule MobDeliverJit#{ctx.id}.TooNew do def hi, do: :new end")
       opts = publish(ctx, [], %{sha(bin) => bin})
@@ -366,12 +402,20 @@ defmodule MobDeliver.ResolverTest do
           armed: nil,
           boots: 0,
           rejected: [],
-          rejected_code: [Manifest.code_id(manifest, "2.0.0")],
+          rejected_code: [{Manifest.code_id(manifest), "2.0.0"}],
           notice: nil
         })
       )
 
-      opts = serving(ctx, %{sha(bin) => bin})
+      # A launch after the rollback: a fresh watchdog reads the state file.
+      launched = :"#{ctx.watchdog}_launched"
+
+      start_supervised!({Watchdog, name: launched, store: ctx.store, app_version: "2.0.0"},
+        id: launched
+      )
+
+      :ok = Watchdog.mark_stable(launched)
+      opts = Keyword.put(serving(ctx, %{sha(bin) => bin}), :watchdog, launched)
       # Same modules, published again later.
       publish_latest(ctx, [{mod, bin}], %{"issued_at" => "2026-09-30T00:00:00Z"})
 

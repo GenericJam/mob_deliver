@@ -150,8 +150,8 @@ defmodule MobDeliver.InstallerTest do
       :erlang.term_to_binary(%{
         armed: nil,
         boots: 0,
-        rejected: [Store.manifest_id(rolled_back)],
-        rejected_code: [Manifest.code_id(manifest, "2.0.0")],
+        rejected: [],
+        rejected_code: [{Manifest.code_id(manifest), "2.0.0"}],
         notice: nil
       })
     )

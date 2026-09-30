@@ -3,6 +3,8 @@ defmodule MobDeliver.Resolver do
   # JIT delivery: make `module` callable, fetching it (and the delivered
   # modules it calls) on a cache miss. See MobDeliver.resolve/1.
 
+  require Logger
+
   alias MobDeliver.{
     Config,
     Fetcher,
@@ -80,14 +82,31 @@ defmodule MobDeliver.Resolver do
         found
 
       _absent_or_none ->
-        if :code.which(module) == :non_existing and not route?(module),
-          do: refreshed(key, opts),
-          else: :bundled
+        cond do
+          :code.which(module) != :non_existing or route?(module) ->
+            :bundled
+
+          # Code that isn't installed has no probation record, so it must not
+          # be able to take down a launch: nothing from a refresh runs before
+          # the root screen's first frame (see the ADR).
+          not Watchdog.first_idle?(opts[:watchdog]) ->
+            Logger.info(
+              "mob_deliver: #{inspect(module)} isn't in the installed manifest; " <>
+                "not asking the server before the first screen has rendered"
+            )
+
+            :bundled
+
+          true ->
+            refreshed(key, opts)
+        end
     end
   end
 
   defp refreshed(key, opts) do
-    with {:ok, id, %Manifest{modules: modules} = latest} <- Refresh.latest(opts) do
+    with {:ok, id, %Manifest{modules: modules} = latest} <- Refresh.latest(opts),
+         # The refreshed manifest may have moved this app past its deadline.
+         :ok <- open_gate(opts) do
       cond do
         # An install may have landed while we fetched.
         match?({:ok, _}, delivering(key, opts)) -> delivering(key, opts)

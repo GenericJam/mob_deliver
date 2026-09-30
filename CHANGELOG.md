@@ -19,19 +19,23 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
   `on_start`. Without them the plugin failed its boot and
   `root_screen/2` crashed the app's `on_start`. On older mob the plugin now
   logs why and the app runs its bundled code.
-- A rolled-back update is rejected by its **code**, not just its signed
-  payload: the module → SHA map plus the native app version
-  (`Manifest.code_id/2`). Re-publishing the same modules with a new
-  `issued_at` or update window is refused (`{:ok, :rejected}`); a store
-  update of the app gives the content a fresh probation. Rejections
-  recorded by 0.1.0 keep refusing their exact manifest; the same modules
+- A rolled-back update is rejected by its **code on this app version**,
+  not by its signed payload: `{module → SHA map, native app version}`
+  (`Manifest.code_id/1`). Re-publishing the same modules with a new
+  `issued_at` or update window is refused (`{:ok, :rejected}`); after a
+  store update of the app the same content, even the unchanged manifest,
+  gets a fresh probation, and a manifest whose rollback didn't finish
+  before the store update boots on probation. Rejections recorded by 0.1.0
+  keep refusing their exact manifest on every version; the same modules
   re-published get one more probation launch there.
 - Timed update checks run only while the app is in the foreground
   (Android blocks a backgrounded app's network). The plugin's new
-  `on_background`/`on_resume` lifecycle hooks pause them and run an
-  overdue check on return.
+  `on_background`/`on_resume` lifecycle hooks pause them (cancelling the
+  timer) and run an overdue check on return.
 - A check deferred by an unproven install is retried with exponential
   backoff (5s, doubling, capped at `:poll_interval`) instead of every ~6s.
+- Boot loads a delivered module only if every delivered module it calls
+  is on the device too; otherwise both load on first use.
 - Past the forced-update deadline, navigation **replaces the whole stack**
   with the update screen (`{:reset, screen}` hook verdict, mob 0.9.6), so
   back no longer returns to a user screen.
@@ -44,13 +48,15 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
   on every navigation.
 
 ### Added
-- JIT miss refresh: navigating to (or `resolve/1` of) a module that is in
-  neither the active manifest nor the binary asks the server for its
-  newest manifest (single-flight, at most once per `:refresh_interval`,
-  default 30s, errors included) and loads that screen's modules from it
-  without installing it. Screens published after the device's last update
-  no longer fail until the next poll. Unknown modules still reach the
-  router's normal error.
+- JIT miss refresh: once the first screen has rendered, navigating to (or
+  `resolve/1` of) a module that is in neither the active manifest nor the
+  binary asks the server for its newest manifest (single-flight, at most
+  once per `:refresh_interval`, default 30s, errors included) and loads
+  that screen's modules from it without installing it. Screens published
+  after the device's last update no longer fail until the next poll.
+  Unknown modules still reach the router's normal error; a refreshed
+  manifest that puts the app past its deadline resets to the update
+  screen. Before the first frame nothing uninstalled runs.
 - `{:error, :not_configured}` from `check/0` (logged, naming the missing
   keys) when `:endpoint`, `:app` or `:channel` is unset.
 - The Hex package includes `guides/` and `decisions/`, so README links work.

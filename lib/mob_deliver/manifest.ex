@@ -100,20 +100,17 @@ defmodule MobDeliver.Manifest do
   end
 
   @doc """
-  Identity of what a manifest makes this binary *run*: the SHA-256
-  (lowercase hex) of the canonical encoding of its `modules` map together
-  with `app_version`, the native version of the binary running it.
+  Identity of the code a manifest delivers: the SHA-256 (lowercase hex)
+  of the canonical encoding of its `modules` map.
 
   Unlike `content_id/1` it ignores `issued_at`, `min_app_version` and
   `force_update_after`: re-publishing the same modules, or only moving the
-  update window, yields the same id. The native version is part of it
-  because the same BEAMs can behave differently on a different binary
-  (bundled code, NIFs).
+  update window, yields the same id. `MobDeliver.Watchdog` pairs it with
+  the native app version when it records a rejection.
   """
-  @spec code_id(t(), String.t() | nil) :: String.t()
-  def code_id(%__MODULE__{modules: modules}, app_version) do
-    payload = canonical(%{"app_version" => app_version, "modules" => modules})
-    Base.encode16(:crypto.hash(:sha256, payload), case: :lower)
+  @spec code_id(t()) :: String.t()
+  def code_id(%__MODULE__{modules: modules}) do
+    Base.encode16(:crypto.hash(:sha256, canonical(modules)), case: :lower)
   end
 
   @doc """

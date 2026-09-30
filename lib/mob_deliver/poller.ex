@@ -82,7 +82,8 @@ defmodule MobDeliver.Poller do
        started: false,
        foreground: true,
        # Monotonic ms when the next check is due (nil: none scheduled), and
-       # the token of the timer for it (only armed in the foreground).
+       # `{token, timer_ref}` of the timer for it (only armed in the
+       # foreground; cancelled whenever it's paused or replaced).
        due: nil,
        timer: nil,
        deferrals: 0
@@ -97,7 +98,7 @@ defmodule MobDeliver.Poller do
     {:noreply, run(%{s | started: true})}
   end
 
-  def handle_cast(:background, s), do: {:noreply, %{s | foreground: false, timer: nil}}
+  def handle_cast(:background, s), do: {:noreply, %{cancel(s) | foreground: false}}
 
   def handle_cast(:foreground, %{foreground: true} = s), do: {:noreply, s}
 
@@ -112,8 +113,7 @@ defmodule MobDeliver.Poller do
   end
 
   @impl true
-  def handle_info({:check, token}, %{timer: token} = s) when token != nil,
-    do: {:noreply, run(s)}
+  def handle_info({:check, token}, %{timer: {token, _ref}} = s), do: {:noreply, run(s)}
 
   def handle_info({:DOWN, ref, :process, _pid, reason}, %{running: ref} = s) do
     s = %{s | running: nil}
@@ -143,22 +143,30 @@ defmodule MobDeliver.Poller do
   # The result travels in the exit reason, so it can't race the :DOWN.
   defp run(%{running: nil, check: check} = s) do
     {_pid, ref} = spawn_monitor(fn -> exit({:check_result, check.()}) end)
-    %{s | running: ref, due: nil, timer: nil}
+    %{cancel(s) | running: ref, due: nil}
   end
 
   defp run(s), do: s
 
-  defp schedule(s, false), do: %{s | due: nil, timer: nil}
+  defp schedule(s, false), do: %{cancel(s) | due: nil}
   defp schedule(s, delay), do: arm(%{s | due: now() + delay})
 
   # Timers only run in the foreground; foreground/1 re-arms them.
-  defp arm(%{foreground: false} = s), do: %{s | timer: nil}
+  defp arm(%{foreground: false} = s), do: cancel(s)
 
   defp arm(s) do
+    s = cancel(s)
     token = make_ref()
-    Process.send_after(self(), {:check, token}, max(s.due - now(), 0))
-    %{s | timer: token}
+    ref = Process.send_after(self(), {:check, token}, max(s.due - now(), 0))
+    %{s | timer: {token, ref}}
   end
+
+  defp cancel(%{timer: {_token, ref}} = s) do
+    Process.cancel_timer(ref, async: true, info: false)
+    %{s | timer: nil}
+  end
+
+  defp cancel(s), do: s
 
   defp now, do: System.monotonic_time(:millisecond)
 end

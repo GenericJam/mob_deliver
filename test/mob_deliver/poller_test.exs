@@ -85,6 +85,36 @@ defmodule MobDeliver.PollerTest do
     assert_receive {:checked, 3, _}, 1_000
   end
 
+  test "background/foreground cycles leave one live timer, not one per cycle" do
+    poller = start(interval: 300, retry_after: 60_000)
+    assert_receive {:checked, 1, _}
+    pid = Process.whereis(poller)
+    :erlang.trace(pid, true, [:receive])
+
+    for _ <- 1..5 do
+      Poller.background(poller)
+      Poller.foreground(poller)
+    end
+
+    assert_receive {:checked, 2, _}, 1_000
+    Process.sleep(100)
+    :erlang.trace(pid, false, [:receive])
+
+    timer_messages =
+      Stream.repeatedly(fn ->
+        receive do
+          {:trace, ^pid, :receive, {:check, _}} -> :timer
+          {:trace, ^pid, :receive, _other} -> :other
+        after
+          0 -> nil
+        end
+      end)
+      |> Enum.take_while(& &1)
+      |> Enum.count(&(&1 == :timer))
+
+    assert timer_messages == 1
+  end
+
   test "back in the foreground before a check is due, it runs when due" do
     poller = start(interval: 300, retry_after: 60_000)
     assert_receive {:checked, 1, started}

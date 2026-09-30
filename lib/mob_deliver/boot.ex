@@ -127,13 +127,17 @@ defmodule MobDeliver.Boot do
   # Delivered versions of everything already on the device, loaded before
   # the app's code runs, callees before callers (an @on_load may call into a
   # delivered-only callee). Modules whose blob isn't local are left to
-  # resolve/1 (JIT) or the next boot.
+  # resolve/1 (JIT) or the next boot — and so is every module that calls
+  # one of them: loaded, it would count as resolved and call a version of
+  # its callee this manifest doesn't deliver (or none at all).
   defp load_active(store, timeout) do
     with {_id, %Manifest{modules: modules}} <- Store.active(store) do
       local =
         for {key, sha} <- modules, {:ok, binary} <- [local_blob(store, key, sha)], into: %{} do
           {Manifest.key_module(key), {sha, binary}}
         end
+
+      local = complete_closures(local, modules)
 
       local
       |> callees_first()
@@ -144,6 +148,43 @@ defmodule MobDeliver.Boot do
     end
 
     :ok
+  end
+
+  # Drops local modules whose delivered callees aren't all local, until
+  # nothing changes (a caller of a dropped module is dropped too).
+  defp complete_closures(local, modules) do
+    delivered_callees =
+      Map.new(local, fn {module, {_sha, binary}} ->
+        callees =
+          binary
+          |> Loader.imported_modules()
+          |> Enum.filter(&Map.has_key?(modules, Manifest.module_key(&1)))
+
+        {module, callees}
+      end)
+
+    drop_incomplete(local, delivered_callees)
+  end
+
+  defp drop_incomplete(local, delivered_callees) do
+    incomplete =
+      Enum.find_value(local, fn {module, _} ->
+        missing = Enum.find(delivered_callees[module], &(not Map.has_key?(local, &1)))
+        missing && {module, missing}
+      end)
+
+    case incomplete do
+      nil ->
+        local
+
+      {module, missing} ->
+        Logger.info(
+          "mob_deliver: #{inspect(module)} not loaded at boot: its delivered callee " <>
+            "#{inspect(missing)} isn't on the device; both load on first use"
+        )
+
+        drop_incomplete(Map.delete(local, module), delivered_callees)
+    end
   end
 
   # A missing blob is normal (a JIT module not fetched yet). Anything else

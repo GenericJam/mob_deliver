@@ -160,14 +160,18 @@ defmodule MobDeliver do
       then loads it — together with every delivered module it calls that
       isn't loaded yet, so the whole call closure is present.
     * In neither the active manifest nor the app binary (e.g. published
-      after the last install) → asks the server for its newest manifest —
-      at most once per `:refresh_interval` (default 30s), however many
-      misses — and, if that delivers `module` and this app version may run
-      it, loads it and its closure from there. The manifest itself isn't
-      installed; that stays the update check's job.
+      after the last install), once the root screen has rendered → asks
+      the server for its newest manifest — at most once per
+      `:refresh_interval` (default 30s), however many misses — and, if
+      that delivers `module` and this app version may run it, loads it and
+      its closure from there. The manifest itself isn't installed; that
+      stays the update check's job. Before the first frame nothing is
+      fetched this way (it has no probation record, so it mustn't be able
+      to fail a launch): `{:error, :not_found}`.
     * Otherwise → `Code.ensure_loaded/1` (bundled code), or
       `{:error, :not_found}`.
-    * Past the forced-update deadline → `{:error, :update_required}`.
+    * Past the forced-update deadline → `{:error, :update_required}`,
+      including when the refreshed manifest is what moved the deadline.
 
   **It blocks the caller for the whole fetch** — network round-trips, up
   to Req's timeouts when the network is slow or blocked. Don't call it

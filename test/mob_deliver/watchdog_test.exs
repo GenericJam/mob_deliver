@@ -201,10 +201,36 @@ defmodule MobDeliver.WatchdogTest do
       launch(ctx)
       assert launch(ctx).outcome == {:ok, :rolled_back}
 
+      # The same signed manifest, unchanged.
       updated_app = launch(ctx, app_version: "1.1")
+      assert try_install(ctx, updated_app, "bad") == {:ok, :installed}
+    end
 
-      assert try_install(ctx, updated_app, "bad", %{"issued_at" => "2026-10-01T00:00:00Z"}) ==
-               {:ok, :installed}
+    test "a store update after a rejection was recorded but before the rollback finished puts the manifest on probation",
+         ctx do
+      good = stable_install(ctx, "good")
+      bad = install(ctx, launch(ctx), "bad")
+      {:ok, manifest} = ctx.verify.(body(ctx, "bad"))
+
+      # The rejection is durable, the slot switch back to `good` never happened.
+      File.write!(
+        Path.join(ctx.root, "watchdog"),
+        :erlang.term_to_binary(%{
+          armed: nil,
+          boots: 0,
+          rejected: [],
+          rejected_code: [{Manifest.code_id(manifest), "1.0"}],
+          notice: nil
+        })
+      )
+
+      on_update = launch(ctx, app_version: "1.1")
+      assert on_update.outcome == {:ok, :armed}
+      assert Store.active_id(on_update.store) == bad
+
+      rolled = launch(ctx, app_version: "1.1")
+      assert rolled.outcome == {:ok, :rolled_back}
+      assert Store.active_id(rolled.store) == good
     end
 
     test "rejections recorded before code ids refuse the exact manifest; its modules re-published get one more probation",
@@ -549,6 +575,27 @@ defmodule MobDeliver.WatchdogTest do
       assert boot(ctx) == :ok
       {caller, _} = a
       assert caller.v() == :delivered
+    end
+
+    test "a delivered module whose delivered callee isn't on the device isn't loaded at boot",
+         ctx do
+      n = System.unique_integer([:positive])
+      [{callee, _} = d] = compile_unloaded("defmodule MobDeliverBoot#{n}.D do def v, do: :d end")
+
+      [{caller, _} = h] =
+        compile_unloaded(
+          "defmodule MobDeliverBoot#{n}.H do def run, do: #{inspect(callee)}.v() end"
+        )
+
+      # Both in the active manifest, but only H's blob is local (e.g. stored
+      # by a JIT load from a newer manifest that shares H's SHA).
+      app = processes(ctx)
+      activate_local(ctx, app, [h, d])
+      {_, d_bin} = d
+      File.rm!(Store.blob_path(app.store, sha(d_bin)))
+
+      assert boot(ctx) == :ok
+      refute :code.is_loaded(caller)
     end
 
     test "an @on_load that never returns can't hold the app's boot", ctx do

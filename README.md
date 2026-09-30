@@ -160,9 +160,10 @@ end
 ```
 
 Navigating to a screen that isn't on the device just works: mob's router
-calls mob_deliver before mounting it, which fetches it (asking the server
-for its newest manifest first if the screen was published after the last
-install). That fetch runs in the router, so navigation waits for it. If it
+calls mob_deliver before mounting it, which fetches it (once the first
+screen has rendered, asking the server for its newest manifest first if
+the screen was published after the last install; during startup only
+installed content runs). That fetch runs in the router, so navigation waits for it. If it
 fails, the user stays on the current screen and a `mob_deliver:` warning
 is logged. To show a spinner or a "couldn't load" message instead, call
 `MobDeliver.resolve/1` from a `Task` before navigating (example in its
