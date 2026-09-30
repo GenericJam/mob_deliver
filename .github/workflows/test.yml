@@ -3,6 +3,9 @@ name: tests
 # CI for the plugin's Elixir surface — the same gate mob core runs, so a PR
 # gets a green check instead of relying only on each contributor's local
 # pre-push hook. mob_deliver is pure Elixir (no NIFs), so this covers it all.
+# It runs against mob's master (checked out next to this repo via MOB_PATH):
+# mob_deliver often depends on mob changes that aren't on Hex yet, and this
+# catches framework drift before either side releases.
 
 on:
   push:
@@ -20,6 +23,10 @@ jobs:
     runs-on: ubuntu-latest
     env:
       MIX_ENV: test
+      MOB_PATH: ../mob
+    defaults:
+      run:
+        working-directory: mob_deliver
     strategy:
       fail-fast: false
       matrix:
@@ -28,6 +35,13 @@ jobs:
             otp: '28'
     steps:
       - uses: actions/checkout@v4
+        with:
+          path: mob_deliver
+
+      - uses: actions/checkout@v4
+        with:
+          repository: GenericJam/mob
+          path: mob
 
       - uses: erlef/setup-beam@v1
         with:
@@ -38,9 +52,9 @@ jobs:
         uses: actions/cache@v4
         with:
           path: |
-            deps
-            _build
-          key: mix-${{ runner.os }}-${{ matrix.elixir }}-${{ matrix.otp }}-${{ hashFiles('**/mix.lock') }}
+            mob_deliver/deps
+            mob_deliver/_build
+          key: mix-${{ runner.os }}-${{ matrix.elixir }}-${{ matrix.otp }}-${{ hashFiles('mob_deliver/mix.lock') }}
           restore-keys: mix-${{ runner.os }}-${{ matrix.elixir }}-${{ matrix.otp }}-
 
       - run: mix deps.get
