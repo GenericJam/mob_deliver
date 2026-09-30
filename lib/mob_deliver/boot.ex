@@ -73,7 +73,7 @@ defmodule MobDeliver.Boot do
       {:ok, outcome} ->
         if outcome == :rolled_back, do: log_rollback(store)
 
-        load_active(store, Keyword.get(opts, :load_timeout, @load_timeout))
+        load_active(store, watchdog, Keyword.get(opts, :load_timeout, @load_timeout))
 
         # Nothing can be fetching yet: update checks start later, and no app
         # code (resolve/1) has run.
@@ -130,7 +130,11 @@ defmodule MobDeliver.Boot do
   # resolve/1 (JIT) or the next boot — and so is every module that calls
   # one of them: loaded, it would count as resolved and call a version of
   # its callee this manifest doesn't deliver (or none at all).
-  defp load_active(store, timeout) do
+  #
+  # What's about to load is recorded with the watchdog first (durably while
+  # on probation), so a launch that dies suspects only modules that ran.
+  # If that can't be recorded, nothing delivered loads: fail closed.
+  defp load_active(store, watchdog, timeout) do
     with {_id, %Manifest{modules: modules}} <- Store.active(store) do
       local =
         for {key, sha} <- modules, {:ok, binary} <- [local_blob(store, key, sha)], into: %{} do
@@ -138,13 +142,25 @@ defmodule MobDeliver.Boot do
         end
 
       local = complete_closures(local, modules)
+      pairs = Map.new(local, fn {module, {sha, _}} -> {Manifest.module_key(module), sha} end)
 
-      local
-      |> callees_first()
-      |> Enum.each(fn module ->
-        {sha, binary} = Map.fetch!(local, module)
-        load_bounded(module, binary, Store.blob_path(store, sha), timeout)
-      end)
+      case Watchdog.note_loaded(watchdog, pairs) do
+        :ok ->
+          local
+          |> callees_first()
+          |> Enum.each(fn module ->
+            {sha, binary} = Map.fetch!(local, module)
+            load_bounded(module, binary, Store.blob_path(store, sha), timeout)
+          end)
+
+        {:error, reason} ->
+          Logger.error(
+            "mob_deliver: couldn't record what this launch loads (#{inspect(reason)}); " <>
+              "running bundled code"
+          )
+
+          Store.unpublish(store)
+      end
     end
 
     :ok

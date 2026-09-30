@@ -42,10 +42,23 @@ defmodule MobDeliver.WatchdogTest do
   end
 
   # One app launch: the plugin's boot checks, returning the watchdog outcome.
-  defp launch(ctx, watchdog_opts \\ []) do
+  # Like the real boot, it then loads every module of the active manifest
+  # (all blobs local) and records that, unless `loads:` says what it loads.
+  defp launch(ctx, opts \\ []) do
+    {loads, watchdog_opts} = Keyword.pop(opts, :loads)
     app = processes(ctx, watchdog_opts)
     {:ok, _} = Store.boot(app.store, ctx.verify)
-    Map.put(app, :outcome, Watchdog.on_boot(app.watchdog, ctx.verify))
+    outcome = Watchdog.on_boot(app.watchdog, ctx.verify)
+
+    loads =
+      case {loads, Store.active(app.store)} do
+        {nil, {_id, manifest}} -> manifest.modules
+        {nil, nil} -> %{}
+        {loads, _} -> loads
+      end
+
+    if loads != %{}, do: :ok = Watchdog.note_loaded(app.watchdog, loads)
+    Map.put(app, :outcome, outcome)
   end
 
   defp try_install(ctx, app, label, extra \\ %{}) do
@@ -338,6 +351,93 @@ defmodule MobDeliver.WatchdogTest do
 
       # Changing the broken module is the fix.
       assert try_install(ctx, app, [{"MyApp.Home", "home 2"}, {"MyApp.Greeting", "greeting 2"}]) ==
+               {:ok, :installed}
+    end
+
+    test "only modules the failed launch loaded are suspects: new screens it never ran don't shield the broken one",
+         ctx do
+      stable_install(ctx, [{"MyApp.Home", "home"}, {"MyApp.Greeting", "greeting 1"}])
+
+      install(ctx, launch(ctx), [
+        {"MyApp.Home", "home"},
+        {"MyApp.Greeting", "broken"},
+        {"MyApp.LateScreen", "late 1"},
+        {"MyApp.Late2Screen", "late2 1"}
+      ])
+
+      # Boot loads Home and the broken Greeting; the new screens are never
+      # navigated to. Then it dies rendering Greeting.
+      failed = launch(ctx, loads: %{"MyApp.Home" => sha("home")})
+      assert failed.outcome == {:ok, :armed}
+      :ok = Watchdog.note_loaded(failed.watchdog, %{"MyApp.Greeting" => sha("broken")})
+
+      app = launch(ctx)
+      assert app.outcome == {:ok, :rolled_back}
+
+      # The device run's follow-up: Greeting still broken, a screen edited.
+      assert try_install(ctx, app, [
+               {"MyApp.Home", "home"},
+               {"MyApp.Greeting", "broken"},
+               {"MyApp.LateScreen", "late 2"},
+               {"MyApp.Late2Screen", "late2 1"}
+             ]) == {:ok, :rejected}
+
+      assert try_install(ctx, app, [
+               {"MyApp.Home", "home"},
+               {"MyApp.Greeting", "greeting 2"},
+               {"MyApp.LateScreen", "late 1"},
+               {"MyApp.Late2Screen", "late2 1"}
+             ]) == {:ok, :installed}
+    end
+
+    test "what the failed launch loaded is on disk as it goes: a launch that dies mid-load still counts it",
+         ctx do
+      stable_install(ctx, [{"MyApp.A", "a1"}, {"MyApp.B", "b1"}])
+      install(ctx, launch(ctx), [{"MyApp.A", "a2"}, {"MyApp.B", "b2"}])
+
+      # Records B, starts loading it, and the process dies there.
+      launch(ctx, loads: %{"MyApp.B" => sha("b2")})
+
+      app = launch(ctx)
+      assert app.outcome == {:ok, :rolled_back}
+      assert try_install(ctx, app, [{"MyApp.A", "a3"}, {"MyApp.B", "b2"}]) == {:ok, :rejected}
+      assert try_install(ctx, app, [{"MyApp.A", "a2"}, {"MyApp.B", "b3"}]) == {:ok, :installed}
+    end
+
+    test "a failed launch recorded before loads were tracked suspects everything the update introduced",
+         ctx do
+      stable_install(ctx, [{"MyApp.A", "a1"}, {"MyApp.B", "b1"}])
+      bad = install(ctx, launch(ctx), [{"MyApp.A", "a2"}, {"MyApp.B", "b2"}])
+
+      # State from an older build: armed, one boot, no record of loads.
+      File.write!(
+        Path.join(ctx.root, "watchdog"),
+        :erlang.term_to_binary(%{armed: bad, boots: 1, rejected: [], rejections: [], notice: nil})
+      )
+
+      app = launch(ctx)
+      assert app.outcome == {:ok, :rolled_back}
+
+      assert try_install(ctx, app, [{"MyApp.A", "a2"}, {"MyApp.B", "b2"}, {"MyApp.C", "c"}]) ==
+               {:ok, :rejected}
+
+      assert try_install(ctx, app, [{"MyApp.A", "a2"}, {"MyApp.B", "b3"}]) == {:ok, :installed}
+    end
+
+    test "a failed launch that loaded none of the update's new modules refuses only that manifest",
+         ctx do
+      good = stable_install(ctx, [{"MyApp.A", "a1"}])
+      install(ctx, launch(ctx), [{"MyApp.A", "a2"}])
+
+      # Killed (by the OS, say) before loading anything.
+      launch(ctx, loads: %{})
+      app = launch(ctx)
+      assert app.outcome == {:ok, :rolled_back}
+      assert Store.active_id(app.store) == good
+
+      assert try_install(ctx, app, [{"MyApp.A", "a2"}]) == {:ok, :rejected}
+
+      assert try_install(ctx, app, [{"MyApp.A", "a2"}], %{"issued_at" => "2026-10-02T00:00:00Z"}) ==
                {:ok, :installed}
     end
 

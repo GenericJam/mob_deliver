@@ -62,7 +62,9 @@ defmodule MobDeliver.Watchdog do
   @type server :: GenServer.server()
   @type notice :: %{rolled_back: Store.manifest_id(), at: DateTime.t()}
 
-  @empty %{armed: nil, boots: 0, rejected: [], rejections: [], notice: nil}
+  # `loaded`: delivered modules the booted probation launch loaded, or nil
+  # when that isn't known (outside probation, or state from older builds).
+  @empty %{armed: nil, boots: 0, rejected: [], rejections: [], loaded: nil, notice: nil}
 
   @typedoc """
   A rolled-back manifest on one app version: the pairs it introduced
@@ -133,6 +135,18 @@ defmodule MobDeliver.Watchdog do
   """
   @spec resume_probation(server()) :: :ok | {:error, term()}
   def resume_probation(server), do: GenServer.call(server, :resume_probation)
+
+  @doc """
+  Delivered modules (key => SHA) this launch is about to load. Call it
+  before loading them: while the booted update is on probation the record
+  is written durably, so if the launch dies — even mid-load — the rollback
+  suspects only the update's new modules that actually ran. Outside
+  probation it does nothing. `{:error, _}` if it couldn't be written: then
+  don't load them (fail closed).
+  """
+  @spec note_loaded(server(), %{String.t() => Manifest.sha256()}) :: :ok | {:error, term()}
+  def note_loaded(server, pairs) when is_map(pairs),
+    do: GenServer.call(server, {:note_loaded, pairs})
 
   @doc "Whether this VM reached first idle (`mark_stable/1`); survives a restart of the watchdog."
   @spec first_idle?(server()) :: boolean()
@@ -230,6 +244,26 @@ defmodule MobDeliver.Watchdog do
       end
     else
       {:reply, :ok, s}
+    end
+  end
+
+  # Only the booted, armed launch keeps a record; outside probation nothing
+  # is written.
+  def handle_call({:note_loaded, pairs}, _from, s) do
+    loaded = s.state.loaded
+
+    cond do
+      not booted_armed?(s) or not is_map(loaded) ->
+        {:reply, :ok, s}
+
+      Enum.all?(pairs, fn {key, sha} -> Map.get(loaded, key) == sha end) ->
+        {:reply, :ok, s}
+
+      true ->
+        case write(s, %{s.state | loaded: Map.merge(loaded, pairs)}) do
+          {:ok, s} -> {:reply, :ok, s}
+          {error, s} -> reply(error_reply(error, s))
+        end
     end
   end
 
@@ -346,7 +380,7 @@ defmodule MobDeliver.Watchdog do
       {id, manifest} = Store.active(s.store)
       kept = Enum.reject(s.state.rejections, &refuses?(&1, id, manifest))
 
-      case write(s, %{s.state | armed: nil, boots: 0, rejections: kept}) do
+      case write(s, %{s.state | armed: nil, boots: 0, loaded: nil, rejections: kept}) do
         {:ok, s} ->
           Logger.info("mob_deliver: manifest #{s.booted} reached first idle; disarmed")
           {:ok, s}
@@ -371,9 +405,13 @@ defmodule MobDeliver.Watchdog do
       active != nil and budget > 0 and state.armed == active and state.boots >= 1 ->
         Logger.warning("mob_deliver: manifest #{active} never reached first idle; rolling back")
 
-        # What it replaced is the rollback target (or bundled code).
+        # What it replaced is the rollback target (or bundled code); of
+        # what it introduced, only what this launch loaded can have broken
+        # it (all of it if the loads weren't recorded).
+        introduced = suspects(manifest, Store.previous(s.store, verify))
+
         rejection = %{
-          suspects: suspects(manifest, Store.previous(s.store, verify)),
+          suspects: ran(introduced, state.loaded),
           app_version: s.app_version,
           id: active
         }
@@ -384,6 +422,7 @@ defmodule MobDeliver.Watchdog do
           state
           | armed: nil,
             boots: 0,
+            loaded: nil,
             rejections: [rejection | state.rejections],
             notice: %{rolled_back: active, at: DateTime.utc_now()}
         }
@@ -416,17 +455,23 @@ defmodule MobDeliver.Watchdog do
     end
   end
 
+  # A fresh probation launch: nothing delivered loaded yet.
   defp probation_boot(s, active, boots) do
-    case write(s, %{s.state | armed: active, boots: boots}) do
+    case write(s, %{s.state | armed: active, boots: boots, loaded: %{}}) do
       {:ok, s} -> {{:ok, :armed}, %{s | booted: active}}
       {error, s} -> error_reply(error, s)
     end
   end
 
+  defp ran(introduced, nil), do: introduced
+
+  defp ran(introduced, loaded),
+    do: for({key, sha} <- introduced, Map.get(loaded, key) == sha, into: %{}, do: {key, sha})
+
   defp log_suspects(active, suspects) when suspects == %{},
     do:
       Logger.warning(
-        "mob_deliver: #{active} has the same modules as what it replaced; only it is refused"
+        "mob_deliver: #{active} failed without running any module it introduced; only it is refused"
       )
 
   defp log_suspects(active, suspects) do
@@ -473,6 +518,8 @@ defmodule MobDeliver.Watchdog do
            rejections:
              rejections(Map.get(state, :rejections, [])) ++
                legacy_code_rejections(Map.get(state, :rejected_code, [])),
+           # Absent (unknown) in state written before loads were tracked.
+           loaded: loaded(Map.get(state, :loaded)),
            notice: notice
          }}
 
@@ -489,6 +536,14 @@ defmodule MobDeliver.Watchdog do
         error
     end
   end
+
+  defp loaded(loaded) when is_map(loaded) do
+    if Enum.all?(loaded, fn {key, sha} -> is_binary(key) and is_binary(sha) end),
+      do: loaded,
+      else: nil
+  end
+
+  defp loaded(_), do: nil
 
   defp strings(list), do: Enum.filter(list, &is_binary/1)
 

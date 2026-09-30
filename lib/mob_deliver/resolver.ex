@@ -197,9 +197,12 @@ defmodule MobDeliver.Resolver do
   # before anything loads, then loaded callees-first with the target last:
   # the target only becomes visible (to concurrent resolves, to @on_load)
   # once everything it calls is loaded, and a failed callee leaves it
-  # unloaded so the next resolve retries.
+  # unloaded so the next resolve retries. The closure is recorded with the
+  # watchdog before it loads (durably during a probation launch), so a
+  # rollback suspects what ran; if that fails, nothing loads.
   defp deliver(module, modules, opts) do
-    with {:ok, order} <- closure([module], [], MapSet.new(), modules, opts) do
+    with {:ok, order} <- closure([module], [], MapSet.new(), modules, opts),
+         :ok <- note_loaded(order, opts) do
       Enum.reduce_while(order, :ok, fn {mod, sha, binary}, :ok ->
         case load_once(mod, sha, binary, opts) do
           :ok -> {:cont, :ok}
@@ -207,6 +210,13 @@ defmodule MobDeliver.Resolver do
         end
       end)
     end
+  end
+
+  defp note_loaded([], _opts), do: :ok
+
+  defp note_loaded(order, opts) do
+    pairs = Map.new(order, fn {mod, sha, _binary} -> {Manifest.module_key(mod), sha} end)
+    Watchdog.note_loaded(opts[:watchdog], pairs)
   end
 
   # Breadth-first from the target; the result is reversed discovery order,

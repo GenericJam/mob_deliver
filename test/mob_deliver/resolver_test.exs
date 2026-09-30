@@ -167,6 +167,47 @@ defmodule MobDeliver.ResolverTest do
     end
   end
 
+  test "a screen loaded on first use during a probation launch is a suspect if that launch dies",
+       ctx do
+    {screen, screen_bin} = beam("defmodule MobDeliverJit#{ctx.id}.Probed do def hi, do: :x end")
+    verify = &Manifest.verify(&1, ctx.key, app: "com.example.app", channel: "production")
+
+    install_launch = fn modules ->
+      body = signed(ctx, modules)
+      {:ok, manifest} = verify.(body)
+      name = :"wd_#{System.unique_integer([:positive])}"
+
+      start_supervised!({Watchdog, name: name, store: ctx.store, app_version: "2.0.0"}, id: name)
+
+      {:ok, :installed} = Watchdog.install(name, body, manifest, Store.active_id(ctx.store))
+    end
+
+    # Installed with the new screen and an unrelated new module.
+    install_launch.([{screen, screen_bin}, {:"Elixir.MobDeliverJit#{ctx.id}.Other", "other"}])
+
+    # The probation launch navigates to the screen, then dies.
+    booted = :"wd_booted_#{ctx.id}"
+
+    start_supervised!({Watchdog, name: booted, store: ctx.store, app_version: "2.0.0"},
+      id: booted
+    )
+
+    {:ok, :armed} = Watchdog.on_boot(booted, verify)
+    opts = Keyword.put(serving(ctx, %{sha(screen_bin) => screen_bin}), :watchdog, booted)
+    assert Resolver.resolve(screen, opts) == :ok
+
+    next = :"wd_next_#{ctx.id}"
+    start_supervised!({Watchdog, name: next, store: ctx.store, app_version: "2.0.0"}, id: next)
+    {:ok, :rolled_back} = Watchdog.on_boot(next, verify)
+
+    # Still shipping the screen that ran: refused, whatever else changed.
+    again =
+      signed(ctx, [{screen, screen_bin}, {:"Elixir.MobDeliverJit#{ctx.id}.Other", "other 2"}])
+
+    {:ok, manifest} = verify.(again)
+    assert Watchdog.rejected?(next, Store.manifest_id(again), manifest)
+  end
+
   test "a cache miss fetches, verifies, and loads the module", ctx do
     {mod, bin} = beam("defmodule MobDeliverJit#{ctx.id}.Home do def hi, do: :delivered end")
     opts = publish(ctx, [{mod, bin}], %{sha(bin) => bin})
