@@ -186,9 +186,12 @@ defmodule MobDeliver.Manifest do
   defp modules(%{"modules" => modules}) when is_map(modules) do
     Enum.reduce_while(modules, {:ok, %{}}, fn
       {name, "sha256:" <> hex}, {:ok, acc} when name != "" and byte_size(hex) == 64 ->
-        if hex =~ ~r/\A[0-9a-f]{64}\z/,
-          do: {:cont, {:ok, Map.put(acc, name, hex)}},
-          else: {:halt, {:error, {:invalid_field, "modules"}}}
+        # Base.decode16, not a ~r literal: compile-time regexes break on
+        # OTP 28.0 devices (mob AGENTS.md rule 10).
+        case Base.decode16(hex, case: :lower) do
+          {:ok, _} -> {:cont, {:ok, Map.put(acc, name, hex)}}
+          :error -> {:halt, {:error, {:invalid_field, "modules"}}}
+        end
 
       _, _ ->
         {:halt, {:error, {:invalid_field, "modules"}}}
