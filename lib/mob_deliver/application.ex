@@ -10,6 +10,7 @@ defmodule MobDeliver.Application do
       MobDeliver.Store,
       MobDeliver.Watchdog,
       MobDeliver.Gate,
+      MobDeliver.Refresh,
       MobDeliver.Poller
     ]
 

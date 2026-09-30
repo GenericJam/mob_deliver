@@ -16,14 +16,45 @@ defmodule MobDeliver.Boot do
     store = Keyword.get(opts, :store, Store)
     watchdog = Keyword.get(opts, :watchdog, Watchdog)
 
-    # Anything that fails after Store.boot/2 has published the active
-    # manifest must unpublish it: delivered code never runs unprobated.
-    guarded("boot", fn -> probation_boot(store, watchdog, opts) end, fn ->
-      Store.unpublish(store)
-    end)
+    case readiness(store, opts) do
+      :ok ->
+        # Anything that fails after Store.boot/2 has published the active
+        # manifest must unpublish it: delivered code never runs unprobated.
+        guarded("boot", fn -> probation_boot(store, watchdog, opts) end, fn ->
+          Store.unpublish(store)
+        end)
 
-    guarded("update services", fn -> start_services(watchdog, opts) end, fn -> :ok end)
+        guarded("update services", fn -> start_services(opts) end, fn -> :ok end)
+
+      {:skip, why} ->
+        # Nothing is touched: the stored manifests, probation state and
+        # rejections stay as they are for a boot that can use them.
+        Logger.warning("mob_deliver: #{why}; running bundled code, no update checks")
+    end
+
     :ok
+  end
+
+  # Without its processes (the OTP application not started: mob < 0.9.6
+  # doesn't start plugin applications) every call would exit, and the
+  # router hook would refuse all navigation. Without app/channel the
+  # verifier would reject — and discard — every stored manifest.
+  defp readiness(store, opts) do
+    missing = if Keyword.has_key?(opts, :verify), do: [], else: Config.missing()
+
+    cond do
+      GenServer.whereis(store) == nil ->
+        {:skip,
+         "the :mob_deliver application isn't running (mob >= 0.9.6 starts plugin applications before their on_start)"}
+
+      missing != [] ->
+        {:skip,
+         "not configured (#{Enum.map_join(missing, ", ", &inspect/1)} unset in config :mob_deliver, " <>
+           "or the app config didn't reach the device: that needs mob >= 0.9.6 and its mob_dev)"}
+
+      true ->
+        :ok
+    end
   end
 
   @doc "Verifies a stored or fetched manifest body against this build's key, app, and channel."
@@ -40,8 +71,7 @@ defmodule MobDeliver.Boot do
 
     case Watchdog.on_boot(watchdog, verify) do
       {:ok, outcome} ->
-        if outcome == :rolled_back,
-          do: Logger.warning("mob_deliver: booting the rolled-back manifest")
+        if outcome == :rolled_back, do: log_rollback(store)
 
         load_active(store, Keyword.get(opts, :load_timeout, @load_timeout))
 
@@ -60,18 +90,17 @@ defmodule MobDeliver.Boot do
     end
   end
 
-  defp start_services(watchdog, opts) do
-    # With mob's router hooks, first idle is the root screen's first paint
-    # and navigation resolves/gates itself; without them, first idle falls
-    # back to a timer and the app calls resolve/1 and root_screen/2.
-    hooked? = Keyword.get(opts, :router_hooks, true) and MobDeliver.Hooks.register()
-
-    unless hooked? do
-      Watchdog.mark_stable_after(
-        watchdog,
-        Keyword.get_lazy(opts, :stable_after, &Config.stable_after/0)
-      )
+  defp log_rollback(store) do
+    case Store.active_id(store) do
+      nil -> Logger.warning("mob_deliver: rolled back; booting bundled code")
+      id -> Logger.warning("mob_deliver: rolled back; booting the previous manifest #{id}")
     end
+  end
+
+  defp start_services(opts) do
+    # Navigation resolves and gates itself; first idle is the root screen's
+    # first paint.
+    MobDeliver.Hooks.register()
 
     # `poller: nil` skips update checks (tests).
     if poller = Keyword.get(opts, :poller, Poller) do
@@ -102,7 +131,7 @@ defmodule MobDeliver.Boot do
   defp load_active(store, timeout) do
     with {_id, %Manifest{modules: modules}} <- Store.active(store) do
       local =
-        for {key, sha} <- modules, {:ok, binary} <- [Store.read_blob(store, sha)], into: %{} do
+        for {key, sha} <- modules, {:ok, binary} <- [local_blob(store, key, sha)], into: %{} do
           {Manifest.key_module(key), {sha, binary}}
         end
 
@@ -115,6 +144,19 @@ defmodule MobDeliver.Boot do
     end
 
     :ok
+  end
+
+  # A missing blob is normal (a JIT module not fetched yet). Anything else
+  # means the stored copy is unusable; resolve/1 re-fetches it on first use.
+  defp local_blob(store, key, sha) do
+    with {:error, reason} = error when reason != :missing <- Store.read_blob(store, sha) do
+      Logger.warning(
+        "mob_deliver: stored #{key} (#{sha}) unreadable (#{inspect(reason)}); " <>
+          "not loaded at boot, re-fetched on first use"
+      )
+
+      error
+    end
   end
 
   # Depth-first post-order over the imports graph restricted to `local`.

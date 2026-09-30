@@ -1,9 +1,10 @@
 defmodule MobDeliver.HooksTest do
   use ExUnit.Case, async: true
 
-  alias MobDeliver.{Gate, Hooks, Manifest, SingleFlight, Store, TestPublisher}
+  alias MobDeliver.{Gate, Hooks, Manifest, Refresh, SingleFlight, Store, TestPublisher, Watchdog}
 
   @moduletag :tmp_dir
+  @moduletag :capture_log
 
   setup %{tmp_dir: root} do
     {key, private} = TestPublisher.keypair()
@@ -11,23 +12,46 @@ defmodule MobDeliver.HooksTest do
     store = :"hooks_store_#{n}"
     sf = :"hooks_sf_#{n}"
     gate = :"hooks_gate_#{n}"
+    watchdog = :"hooks_wd_#{n}"
+    refresh = :"hooks_refresh_#{n}"
     verify = &Manifest.verify(&1, key, app: "com.example.app", channel: "production")
     start_supervised!({Store, name: store, root: root}, id: store)
     start_supervised!({SingleFlight, name: sf}, id: sf)
     start_supervised!({Gate, name: gate, store: store, verify: verify}, id: gate)
 
-    plug = fn conn -> Plug.Conn.send_resp(conn, 503, "") end
+    start_supervised!({Watchdog, name: watchdog, store: store, app_version: "1.4.0"},
+      id: watchdog
+    )
+
+    start_supervised!({Refresh, name: refresh}, id: refresh)
+
+    ctx = %{store: store, gate: gate, private: private, verify: verify, n: n}
+    {manifest_body, _} = signed(ctx, %{})
+
+    # Serves a manifest delivering only MyApp.HomeScreen; every blob is unavailable.
+    plug = fn
+      %{request_path: "/manifest"} = conn -> Plug.Conn.send_resp(conn, 200, manifest_body)
+      conn -> Plug.Conn.send_resp(conn, 503, "")
+    end
 
     opts = [
       store: store,
       single_flight: sf,
       gate: gate,
-      app_version: "1.0",
-      check: fn -> :ok end,
-      client_opts: [endpoint: "https://updates.example.test", req_options: [plug: plug]]
+      watchdog: watchdog,
+      refresh: refresh,
+      refresh_interval: 60_000,
+      app_version: "1.4.0",
+      client_opts: [
+        endpoint: "https://updates.example.test",
+        app: "com.example.app",
+        channel: "production",
+        trusted_publish_key: key,
+        req_options: [plug: plug]
+      ]
     ]
 
-    %{opts: opts, store: store, gate: gate, private: private, verify: verify, n: n}
+    Map.put(ctx, :opts, opts)
   end
 
   defp signed(ctx, fields) do
@@ -36,29 +60,39 @@ defmodule MobDeliver.HooksTest do
     {body, manifest}
   end
 
-  test "loaded screens and destinations mob_deliver doesn't deliver pass through", ctx do
+  test "loaded screens and destinations nobody delivers pass through to the router", ctx do
     {body, manifest} = signed(ctx, %{})
     :ok = Store.activate(ctx.store, body, manifest, nil)
 
     assert Hooks.before_navigate(Enum, ctx.opts) == :ok
     assert Hooks.before_navigate(:settings_route, ctx.opts) == :ok
+    assert Hooks.before_navigate(:"Elixir.MobDeliverHooks#{ctx.n}.Typo", ctx.opts) == :ok
   end
 
-  test "a delivered screen that can't be fetched refuses the navigation", ctx do
+  test "a delivered screen that can't be fetched refuses the navigation, with a warning", ctx do
     key = "MobDeliverHooks#{ctx.n}.Remote"
     {body, manifest} = signed(ctx, %{"modules" => %{key => "sha256:" <> TestPublisher.sha()}})
     :ok = Store.activate(ctx.store, body, manifest, nil)
 
-    assert {:error, {:http_status, 503}} =
-             Hooks.before_navigate(Manifest.key_module(key), ctx.opts)
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert {:error, {:http_status, 503}} =
+                 Hooks.before_navigate(Manifest.key_module(key), ctx.opts)
+      end)
+
+    assert log =~ "mob_deliver: navigation to #{key} refused"
   end
 
-  test "past the forced-update deadline navigation is redirected to the update screen", ctx do
+  test "past the forced-update deadline navigation replaces the whole stack with the update screen",
+       ctx do
     {body, manifest} =
       signed(ctx, %{"min_app_version" => "2.0", "force_update_after" => "2026-01-01T00:00:00Z"})
 
     :ok = Gate.record(ctx.gate, body, manifest)
 
-    assert Hooks.before_navigate(Enum, ctx.opts) == {:redirect, MobDeliver.UpdateRequiredScreen}
+    assert Hooks.before_navigate(Enum, ctx.opts) == {:reset, MobDeliver.UpdateRequiredScreen}
+
+    assert Hooks.before_navigate(MobDeliver.UpdateRequiredScreen, ctx.opts) ==
+             {:reset, MobDeliver.UpdateRequiredScreen}
   end
 end

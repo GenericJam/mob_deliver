@@ -14,36 +14,50 @@ defmodule MobDeliver.WatchdogTest do
 
   defp sha(bin), do: Base.encode16(:crypto.hash(:sha256, bin), case: :lower)
 
-  defp body(ctx, modules) when is_list(modules) do
+  defp body(ctx, modules, extra \\ %{})
+
+  defp body(ctx, modules, extra) when is_list(modules) do
     %{"modules" => Map.new(modules, fn {key, bin} -> {key, "sha256:" <> sha(bin)} end)}
+    |> Map.merge(extra)
     |> TestPublisher.fields()
     |> TestPublisher.sign(ctx.private)
     |> JSON.encode!()
   end
 
-  defp body(ctx, label), do: body(ctx, [{"MyApp.Home", label}])
+  defp body(ctx, label, extra), do: body(ctx, [{"MyApp.Home", label}], extra)
 
   # Fresh processes over the same on-disk store — one app launch's worth.
-  defp processes(ctx) do
+  defp processes(ctx, watchdog_opts \\ []) do
     n = System.unique_integer([:positive])
     store = :"wd_store_#{n}"
     watchdog = :"wd_#{n}"
     start_supervised!({Store, name: store, root: ctx.root}, id: store)
-    start_supervised!({Watchdog, name: watchdog, store: store}, id: watchdog)
+
+    start_supervised!(
+      {Watchdog, watchdog_opts ++ [name: watchdog, store: store, app_version: "1.0"]},
+      id: watchdog
+    )
+
     %{store: store, watchdog: watchdog}
   end
 
   # One app launch: the plugin's boot checks, returning the watchdog outcome.
-  defp launch(ctx) do
-    app = processes(ctx)
+  defp launch(ctx, watchdog_opts \\ []) do
+    app = processes(ctx, watchdog_opts)
     {:ok, _} = Store.boot(app.store, ctx.verify)
     Map.put(app, :outcome, Watchdog.on_boot(app.watchdog, ctx.verify))
   end
 
-  defp try_install(ctx, app, label) do
-    b = body(ctx, label)
+  defp try_install(ctx, app, label, extra \\ %{}) do
+    b = body(ctx, label, extra)
     {:ok, manifest} = ctx.verify.(b)
     Watchdog.install(app.watchdog, b, manifest, Store.active_id(app.store))
+  end
+
+  defp rejected?(ctx, app, label) do
+    b = body(ctx, label)
+    {:ok, manifest} = ctx.verify.(b)
+    Watchdog.rejected?(app.watchdog, Store.manifest_id(b), manifest)
   end
 
   defp install(ctx, app, label) do
@@ -73,7 +87,7 @@ defmodule MobDeliver.WatchdogTest do
       assert Store.active_id(second.store) == good
       assert %{rolled_back: ^bad} = Watchdog.take_notice(second.watchdog)
       assert Watchdog.take_notice(second.watchdog) == nil
-      assert Watchdog.rejected?(second.watchdog, bad)
+      assert rejected?(ctx, second, "bad")
       assert try_install(ctx, second, "bad") == {:ok, :rejected}
     end
 
@@ -160,6 +174,65 @@ defmodule MobDeliver.WatchdogTest do
       {:ok, manifest} = ctx.verify.(reencoded)
 
       assert Watchdog.install(app.watchdog, reencoded, manifest, Store.active_id(app.store)) ==
+               {:ok, :rejected}
+    end
+
+    test "the same modules re-published with a new issued_at or update window stay rejected",
+         ctx do
+      stable_install(ctx, "good")
+      install(ctx, launch(ctx), "bad")
+      launch(ctx)
+      app = launch(ctx)
+      assert app.outcome == {:ok, :rolled_back}
+
+      republished = %{
+        "issued_at" => "2026-09-30T20:46:35Z",
+        "min_app_version" => "1.0",
+        "force_update_after" => "2027-01-01T00:00:00Z"
+      }
+
+      assert try_install(ctx, app, "bad", republished) == {:ok, :rejected}
+      assert try_install(ctx, launch(ctx), "bad", republished) == {:ok, :rejected}
+    end
+
+    test "a store update of the app gives rolled-back modules a fresh probation", ctx do
+      stable_install(ctx, "good")
+      install(ctx, launch(ctx), "bad")
+      launch(ctx)
+      assert launch(ctx).outcome == {:ok, :rolled_back}
+
+      updated_app = launch(ctx, app_version: "1.1")
+
+      assert try_install(ctx, updated_app, "bad", %{"issued_at" => "2026-10-01T00:00:00Z"}) ==
+               {:ok, :installed}
+    end
+
+    test "rejections recorded before code ids refuse the exact manifest; its modules re-published get one more probation",
+         ctx do
+      good = stable_install(ctx, "good")
+
+      File.write!(
+        Path.join(ctx.root, "watchdog"),
+        :erlang.term_to_binary(%{
+          armed: nil,
+          boots: 0,
+          rejected: [Store.manifest_id(body(ctx, "bad"))],
+          notice: nil
+        })
+      )
+
+      app = launch(ctx)
+      assert try_install(ctx, app, "bad") == {:ok, :rejected}
+
+      republished = %{"issued_at" => "2026-09-30T00:00:00Z"}
+      assert try_install(ctx, app, "bad", republished) == {:ok, :installed}
+
+      assert launch(ctx).outcome == {:ok, :armed}
+      rolled = launch(ctx)
+      assert rolled.outcome == {:ok, :rolled_back}
+      assert Store.active_id(rolled.store) == good
+
+      assert try_install(ctx, rolled, "bad", %{"issued_at" => "2026-10-02T00:00:00Z"}) ==
                {:ok, :rejected}
     end
 
@@ -292,6 +365,43 @@ defmodule MobDeliver.WatchdogTest do
       assert {:error, {:watchdog_unreadable, :eacces}} = try_install(ctx, app, "next")
     end
 
+    test "without its settings on the device the boot runs bundled code and changes nothing",
+         ctx do
+      stable_install(ctx, "good")
+      update = install(ctx, launch(ctx), "update")
+      app = processes(ctx)
+
+      # No :verify, so the boot reads config :mob_deliver, which this test
+      # environment leaves empty — as on a device whose config never arrived.
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert Boot.run(store: app.store, watchdog: app.watchdog, poller: nil) == :ok
+        end)
+
+      assert log =~ "mob_deliver: not configured (:trusted_publish_key, :endpoint, :app, :channel"
+      assert Store.active(app.store) == nil
+
+      # The stored update still gets its probation boot once configured.
+      next = launch(ctx)
+      assert next.outcome == {:ok, :armed}
+      assert Store.active_id(next.store) == update
+    end
+
+    test "without mob_deliver's processes (its application not started) the boot is a logged no-op",
+         ctx do
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert Boot.run(
+                   store: :no_such_store,
+                   watchdog: :no_such_watchdog,
+                   verify: ctx.verify,
+                   poller: nil
+                 ) == :ok
+        end)
+
+      assert log =~ "the :mob_deliver application isn't running"
+    end
+
     test "if the watchdog itself is gone, the boot still runs bundled code", ctx do
       stable_install(ctx, "good")
       app = processes(ctx)
@@ -311,16 +421,16 @@ defmodule MobDeliver.WatchdogTest do
     test "rejections are never forgotten, however many there are", ctx do
       stable_install(ctx, "good")
 
-      rejected =
+      labels =
         for i <- 1..25 do
-          id = install(ctx, launch(ctx), "bad #{i}")
+          install(ctx, launch(ctx), "bad #{i}")
           launch(ctx)
           assert launch(ctx).outcome == {:ok, :rolled_back}
-          id
+          "bad #{i}"
         end
 
       app = launch(ctx)
-      assert Enum.all?(rejected, &Watchdog.rejected?(app.watchdog, &1))
+      assert Enum.all?(labels, &rejected?(ctx, app, &1))
       assert try_install(ctx, app, "bad 1") == {:ok, :rejected}
     end
   end
@@ -411,14 +521,8 @@ defmodule MobDeliver.WatchdogTest do
       app = processes(ctx)
 
       Boot.run(
-        [
-          store: app.store,
-          watchdog: app.watchdog,
-          gate: nil,
-          verify: ctx.verify,
-          poller: nil,
-          stable_after: 60_000
-        ] ++ extra
+        [store: app.store, watchdog: app.watchdog, gate: nil, verify: ctx.verify, poller: nil] ++
+          extra
       )
     end
 

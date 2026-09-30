@@ -3,9 +3,12 @@ defmodule MobDeliver.Client do
   HTTP side of wire format v1: `POST /manifest`.
 
   Uses `Req`. TLS trust is the host app's call: pass `cacerts` /
-  `partial_chain` etc. through `:req_options` (on Android, or anywhere
-  the BEAM has no system trust store, see `Mob.Certs`).
+  `partial_chain` etc. through `:req_options`. On Android the BEAM has no
+  system trust store, so without them every HTTPS request fails with
+  `{:transport, _}` (see the README's "HTTPS on Android").
   """
+
+  require Logger
 
   alias MobDeliver.Manifest
 
@@ -20,8 +23,9 @@ defmodule MobDeliver.Client do
 
   @type error ::
           :no_trusted_publish_key
+          | :not_configured
           | {:http_status, pos_integer()}
-          | {:transport, Exception.t()}
+          | {:transport, Exception.t() | {:exit, term()}}
           | Manifest.error()
 
   @doc """
@@ -30,15 +34,19 @@ defmodule MobDeliver.Client do
   from (what `MobDeliver.Store` persists and re-verifies).
 
   Fails before any request when `:trusted_publish_key` is unset: there is
-  no unverified mode. `:req_options` are merged over the defaults, which
-  disable Req's automatic retries (scheduling and retry policy belong to
-  the caller) and body decoding (the body is verified as raw JSON).
+  no unverified mode. `{:error, :not_configured}` (logged, naming the
+  missing keys) when `:endpoint`, `:app` or `:channel` is `nil`.
+  `:req_options` are merged over the defaults, which disable Req's
+  automatic retries (scheduling and retry policy belong to the caller)
+  and body decoding (the body is verified as raw JSON).
   """
   @spec fetch_manifest([option()]) :: {:ok, Manifest.t(), binary()} | {:error, error()}
   def fetch_manifest(opts) do
-    case Keyword.get(opts, :trusted_publish_key) do
-      nil -> {:error, :no_trusted_publish_key}
-      key -> request_manifest(key, opts)
+    with :ok <- configured(opts, [:endpoint, :app, :channel]) do
+      case Keyword.get(opts, :trusted_publish_key) do
+        nil -> {:error, :no_trusted_publish_key}
+        key -> request_manifest(key, opts)
+      end
     end
   end
 
@@ -49,9 +57,24 @@ defmodule MobDeliver.Client do
   """
   @spec fetch_beam(String.t(), [option()]) :: {:ok, binary()} | {:error, error()}
   def fetch_beam(sha, opts) do
-    case request(opts, method: :get, url: url(opts, "/beam/" <> sha)) do
-      {:ok, body} -> {:ok, body}
-      {:error, _} = error -> error
+    with :ok <- configured(opts, [:endpoint]) do
+      request(opts, method: :get, url: url(opts, "/beam/" <> sha))
+    end
+  end
+
+  defp configured(opts, keys) do
+    case Enum.filter(keys, &(Keyword.get(opts, &1) == nil)) do
+      [] ->
+        :ok
+
+      missing ->
+        Logger.warning(
+          "mob_deliver: not configured (#{Enum.map_join(missing, ", ", &inspect/1)} unset in " <>
+            "config :mob_deliver, or the config didn't reach the device: that needs mob >= 0.9.6 " <>
+            "and a native build with the matching mob_dev); no update check"
+        )
+
+        {:error, :not_configured}
     end
   end
 
@@ -86,5 +109,11 @@ defmodule MobDeliver.Client do
       {:ok, %Req.Response{status: status}} -> {:error, {:http_status, status}}
       {:error, exception} -> {:error, {:transport, exception}}
     end
+  rescue
+    # Some failures raise instead of returning an error, e.g. Mint's
+    # "default CA trust store not available" when no CA certs are configured.
+    exception -> {:error, {:transport, exception}}
+  catch
+    :exit, reason -> {:error, {:transport, {:exit, reason}}}
   end
 end

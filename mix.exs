@@ -39,7 +39,7 @@ defmodule MobDeliver.MixProject do
         "GitHub" => @source_url,
         "Mob" => "https://hexdocs.pm/mob"
       },
-      files: ~w(lib priv .formatter.exs mix.exs README.md LICENSE CHANGELOG.md)
+      files: ~w(lib priv guides decisions .formatter.exs mix.exs README.md LICENSE CHANGELOG.md)
     ]
   end
 
@@ -59,9 +59,12 @@ defmodule MobDeliver.MixProject do
 
   defp deps do
     [
-      # The host framework (Mob.data_dir/1, Mob.Device, Mob.Screen). Every mob
-      # app already depends on and starts :mob, so it's compile-time here.
-      {:mob, "~> 0.9", runtime: false},
+      # The host framework (Mob.data_dir/1, Mob.Device, Mob.Screen, router
+      # hooks). Every mob app already depends on and starts :mob, so it's
+      # compile-time here. 0.9.6 ships the app config to the device and
+      # starts plugin OTP applications (and their deps) before on_start.
+      # MOB_PATH=../mob tests against an unreleased mob checkout.
+      mob_dep(),
       # Plugin manifest validator lives here. Dev/test only — the host app
       # supplies mob_dev at build time.
       {:mob_dev, "~> 0.6", only: [:dev, :test], runtime: false},
@@ -78,5 +81,12 @@ defmodule MobDeliver.MixProject do
       # Docs.
       {:ex_doc, "~> 0.34", only: :dev, runtime: false}
     ]
+  end
+
+  defp mob_dep do
+    case System.get_env("MOB_PATH") do
+      nil -> {:mob, "~> 0.9.6", runtime: false}
+      path -> {:mob, path: path, runtime: false, override: true}
+    end
   end
 end

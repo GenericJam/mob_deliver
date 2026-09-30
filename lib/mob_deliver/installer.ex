@@ -46,7 +46,7 @@ defmodule MobDeliver.Installer do
       cond do
         id == expected -> {:ok, :current}
         not Gate.installable?(manifest, opts[:app_version]) -> {:ok, :below_min_version}
-        Watchdog.rejected?(opts[:watchdog], id) -> {:ok, :rejected}
+        Watchdog.rejected?(opts[:watchdog], id, manifest) -> {:ok, :rejected}
         not Watchdog.ready_to_install?(opts[:watchdog]) -> {:ok, :deferred}
         true -> install(id, body, manifest, expected, opts)
       end
@@ -69,7 +69,11 @@ defmodule MobDeliver.Installer do
     with :ok <- prefetch(manifest, opts),
          {:ok, :installed} = installed <-
            Watchdog.install(opts[:watchdog], body, manifest, expected) do
-      Logger.info("mob_deliver: installed manifest #{id}; it takes effect at the next launch")
+      Logger.info(
+        "mob_deliver: installed manifest #{id}; modules this session already runs " <>
+          "switch to it at the next launch, others load from it on first use"
+      )
+
       installed
     end
   end

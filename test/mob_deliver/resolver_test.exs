@@ -1,7 +1,16 @@
 defmodule MobDeliver.ResolverTest do
   use ExUnit.Case, async: true
 
-  alias MobDeliver.{Manifest, Resolver, SingleFlight, Store, TestPublisher}
+  alias MobDeliver.{
+    Gate,
+    Manifest,
+    Refresh,
+    Resolver,
+    SingleFlight,
+    Store,
+    TestPublisher,
+    Watchdog
+  }
 
   @moduletag :tmp_dir
 
@@ -10,10 +19,34 @@ defmodule MobDeliver.ResolverTest do
     id = System.unique_integer([:positive])
     store = :"resolver_store_#{id}"
     sf = :"resolver_sf_#{id}"
+    gate = :"resolver_gate_#{id}"
+    watchdog = :"resolver_wd_#{id}"
+    refresh = :"resolver_refresh_#{id}"
+    verify = &Manifest.verify(&1, key, app: "com.example.app", channel: "production")
     start_supervised!({Store, name: store, root: root}, id: store)
     start_supervised!({SingleFlight, name: sf}, id: sf)
+    start_supervised!({Gate, name: gate, store: store, verify: verify}, id: gate)
 
-    %{store: store, sf: sf, key: key, private: private, id: id}
+    start_supervised!({Watchdog, name: watchdog, store: store, app_version: "2.0.0"},
+      id: watchdog
+    )
+
+    start_supervised!({Refresh, name: refresh}, id: refresh)
+    # What the server's POST /manifest answers (nil: 404).
+    latest = start_supervised!({Agent, fn -> nil end})
+
+    %{
+      store: store,
+      sf: sf,
+      gate: gate,
+      watchdog: watchdog,
+      refresh: refresh,
+      latest: latest,
+      root: root,
+      key: key,
+      private: private,
+      id: id
+    }
   end
 
   defp sha(bin), do: Base.encode16(:crypto.hash(:sha256, bin), case: :lower)
@@ -31,16 +64,28 @@ defmodule MobDeliver.ResolverTest do
     {module, binary}
   end
 
-  # Activates a manifest mapping each module to the SHA of the given bytes.
+  defp signed(ctx, modules, extra \\ %{}) do
+    %{
+      "modules" =>
+        Map.new(modules, fn {mod, bin} -> {Manifest.module_key(mod), "sha256:" <> sha(bin)} end)
+    }
+    |> Map.merge(extra)
+    |> TestPublisher.fields()
+    |> TestPublisher.sign(ctx.private)
+    |> JSON.encode!()
+  end
+
+  # The server publishes a manifest mapping each module to the SHA of the
+  # given bytes; the device doesn't install it.
+  defp publish_latest(ctx, modules, extra \\ %{}) do
+    body = signed(ctx, modules, extra)
+    Agent.update(ctx.latest, fn _ -> body end)
+    body
+  end
+
+  # Publishes a manifest and installs it on the device.
   defp activate_manifest(ctx, modules) do
-    body =
-      %{
-        "modules" =>
-          Map.new(modules, fn {mod, bin} -> {Manifest.module_key(mod), "sha256:" <> sha(bin)} end)
-      }
-      |> TestPublisher.fields()
-      |> TestPublisher.sign(ctx.private)
-      |> JSON.encode!()
+    body = publish_latest(ctx, modules)
 
     {:ok, manifest} =
       Manifest.verify(body, ctx.key, app: "com.example.app", channel: "production")
@@ -48,37 +93,66 @@ defmodule MobDeliver.ResolverTest do
     :ok = Store.activate(ctx.store, body, manifest, Store.active_id(ctx.store))
   end
 
-  # Resolver options whose server answers GET /beam/:sha from `blobs`
-  # (sha => bytes, or a 0-arity fun run at request time returning bytes).
+  # Resolver options whose server answers POST /manifest with the latest
+  # published manifest and GET /beam/:sha from `blobs` (sha => bytes, or a
+  # 0-arity fun run at request time returning bytes).
   defp serving(ctx, blobs) do
     test_pid = self()
+    latest = ctx.latest
 
-    plug = fn conn ->
-      "/beam/" <> requested = conn.request_path
-      send(test_pid, {:fetched, requested})
+    plug = fn
+      %{request_path: "/manifest"} = conn ->
+        send(test_pid, :manifest_fetched)
 
-      case Map.fetch(blobs, requested) do
-        {:ok, bytes_fun} when is_function(bytes_fun, 0) ->
-          Plug.Conn.send_resp(conn, 200, bytes_fun.())
+        case Agent.get(latest, & &1) do
+          nil -> Plug.Conn.send_resp(conn, 404, "")
+          body -> Plug.Conn.send_resp(conn, 200, body)
+        end
 
-        {:ok, bytes} ->
-          Plug.Conn.send_resp(conn, 200, bytes)
+      %{request_path: "/beam/" <> requested} = conn ->
+        send(test_pid, {:fetched, requested})
 
-        :error ->
-          Plug.Conn.send_resp(conn, 404, "")
-      end
+        case Map.fetch(blobs, requested) do
+          {:ok, bytes_fun} when is_function(bytes_fun, 0) ->
+            Plug.Conn.send_resp(conn, 200, bytes_fun.())
+
+          {:ok, bytes} ->
+            Plug.Conn.send_resp(conn, 200, bytes)
+
+          :error ->
+            Plug.Conn.send_resp(conn, 404, "")
+        end
     end
 
     [
       store: ctx.store,
       single_flight: ctx.sf,
-      client_opts: [endpoint: "https://updates.example.test", req_options: [plug: plug]]
+      gate: ctx.gate,
+      watchdog: ctx.watchdog,
+      refresh: ctx.refresh,
+      refresh_interval: 60_000,
+      app_version: "2.0.0",
+      client_opts: [
+        endpoint: "https://updates.example.test",
+        app: "com.example.app",
+        channel: "production",
+        trusted_publish_key: ctx.key,
+        req_options: [plug: plug]
+      ]
     ]
   end
 
   defp publish(ctx, modules, blobs) do
     activate_manifest(ctx, modules)
     serving(ctx, blobs)
+  end
+
+  defp manifest_fetches do
+    receive do
+      :manifest_fetched -> 1 + manifest_fetches()
+    after
+      0 -> 0
+    end
   end
 
   defp fetch_count(sha) do
@@ -158,13 +232,9 @@ defmodule MobDeliver.ResolverTest do
     assert fetch_count(sha(bin)) == 0
   end
 
-  test "loaded modules resolve immediately; unknown ones are :not_found", ctx do
-    opts = publish(ctx, [], %{})
-
-    assert Resolver.resolve(Enum, opts) == :ok
-
-    assert Resolver.resolve(:"Elixir.MobDeliverJit#{ctx.id}.Nowhere", opts) ==
-             {:error, :not_found}
+  test "loaded modules resolve immediately", ctx do
+    assert Resolver.resolve(Enum, serving(ctx, %{})) == :ok
+    assert manifest_fetches() == 0
   end
 
   test "a callee that fails to load leaves the target unloaded, and a later resolve retries",
@@ -221,34 +291,105 @@ defmodule MobDeliver.ResolverTest do
     assert fetch_count(sha(new_helper)) == 0
   end
 
-  test "with nothing installed yet, a delivered-only module waits for one check", ctx do
-    {mod, bin} = beam("defmodule MobDeliverJit#{ctx.id}.FirstLaunch do def hi, do: :jit end")
-    test_pid = self()
+  describe "a module the active manifest doesn't deliver" do
+    test "published after the last install: loaded from the server's newest manifest, which isn't installed",
+         ctx do
+      {mod, bin} = beam("defmodule MobDeliverJit#{ctx.id}.Late do def hi, do: :late end")
+      opts = publish(ctx, [], %{sha(bin) => bin})
+      installed = Store.active_id(ctx.store)
+      publish_latest(ctx, [{mod, bin}])
 
-    check = fn ->
-      send(test_pid, :checked)
-      activate_manifest(ctx, [{mod, bin}])
+      assert Resolver.resolve(mod, opts) == :ok
+      assert mod.hi() == :late
+      assert Store.active_id(ctx.store) == installed
     end
 
-    opts = Keyword.put(serving(ctx, %{sha(bin) => bin}), :check, check)
+    test "with nothing installed yet, a delivered-only module comes from the server's manifest",
+         ctx do
+      {mod, bin} = beam("defmodule MobDeliverJit#{ctx.id}.FirstLaunch do def hi, do: :jit end")
+      publish_latest(ctx, [{mod, bin}])
 
-    assert Resolver.resolve(mod, opts) == :ok
-    assert_received :checked
-    assert mod.hi() == :jit
-  end
+      assert Resolver.resolve(mod, serving(ctx, %{sha(bin) => bin})) == :ok
+      assert mod.hi() == :jit
+      assert Store.active(ctx.store) == nil
+    end
 
-  test "a check that installs a manifest without the module leaves it :not_found", ctx do
-    check = fn -> activate_manifest(ctx, []) end
-    opts = Keyword.put(serving(ctx, %{}), :check, check)
+    test "unknown to the server too: :not_found", ctx do
+      opts = publish(ctx, [], %{})
 
-    assert Resolver.resolve(:"Elixir.MobDeliverJit#{ctx.id}.NotShipped", opts) ==
-             {:error, :not_found}
+      assert Resolver.resolve(:"Elixir.MobDeliverJit#{ctx.id}.Nowhere", opts) ==
+               {:error, :not_found}
+    end
+
+    test "the server can't be asked: its error", ctx do
+      opts = serving(ctx, %{})
+
+      assert Resolver.resolve(:"Elixir.MobDeliverJit#{ctx.id}.Offline", opts) ==
+               {:error, {:http_status, 404}}
+    end
+
+    test "a burst of misses asks the server once per refresh interval", ctx do
+      opts = Keyword.put(publish(ctx, [], %{}), :refresh_interval, 1_000)
+      unknown = for n <- 1..10, do: :"Elixir.MobDeliverJit#{ctx.id}.Unknown#{n}"
+
+      unknown
+      |> Task.async_stream(&Resolver.resolve(&1, opts), max_concurrency: 10)
+      |> Enum.each(&assert(&1 == {:ok, {:error, :not_found}}))
+
+      Enum.each(unknown, &assert(Resolver.resolve(&1, opts) == {:error, :not_found}))
+      assert manifest_fetches() == 1
+
+      Process.sleep(1_100)
+      assert Resolver.resolve(hd(unknown), opts) == {:error, :not_found}
+      assert manifest_fetches() == 1
+    end
+
+    test "the server's manifest isn't used if this app version is below its floor", ctx do
+      {mod, bin} = beam("defmodule MobDeliverJit#{ctx.id}.TooNew do def hi, do: :new end")
+      opts = publish(ctx, [], %{sha(bin) => bin})
+      publish_latest(ctx, [{mod, bin}], %{"min_app_version" => "3.0"})
+
+      assert Resolver.resolve(mod, opts) == {:error, :not_found}
+      refute :code.is_loaded(mod)
+    end
+
+    test "the server's manifest isn't used if this device rolled its modules back", ctx do
+      {mod, bin} = beam("defmodule MobDeliverJit#{ctx.id}.Bad do def hi, do: :bad end")
+      rolled_back = signed(ctx, [{mod, bin}])
+
+      {:ok, manifest} =
+        Manifest.verify(rolled_back, ctx.key, app: "com.example.app", channel: "production")
+
+      File.write!(
+        Path.join(ctx.root, "watchdog"),
+        :erlang.term_to_binary(%{
+          armed: nil,
+          boots: 0,
+          rejected: [],
+          rejected_code: [Manifest.code_id(manifest, "2.0.0")],
+          notice: nil
+        })
+      )
+
+      opts = serving(ctx, %{sha(bin) => bin})
+      # Same modules, published again later.
+      publish_latest(ctx, [{mod, bin}], %{"issued_at" => "2026-09-30T00:00:00Z"})
+
+      assert Resolver.resolve(mod, opts) == {:error, :not_found}
+      refute :code.is_loaded(mod)
+    end
+
+    test "bundled code resolves without asking the server", ctx do
+      opts = serving(ctx, %{})
+
+      # stdlib's :erl_tar is on the code path but not loaded in the test VM.
+      assert Resolver.resolve(:erl_tar, opts) == :ok
+      assert :code.is_loaded(:erl_tar) != false
+      assert manifest_fetches() == 0
+    end
   end
 
   test "past the forced-update deadline nothing resolves, loaded or not", ctx do
-    gate = :"resolver_gate_#{ctx.id}"
-    start_supervised!({MobDeliver.Gate, name: gate, store: ctx.store}, id: gate)
-
     body =
       %{"min_app_version" => "2.0", "force_update_after" => "2026-10-19T00:00:00Z"}
       |> TestPublisher.fields()
@@ -258,22 +399,14 @@ defmodule MobDeliver.ResolverTest do
     {:ok, manifest} =
       Manifest.verify(body, ctx.key, app: "com.example.app", channel: "production")
 
-    :ok = MobDeliver.Gate.record(gate, body, manifest)
+    :ok = Gate.record(ctx.gate, body, manifest)
 
-    opts = serving(ctx, %{}) ++ [gate: gate, app_version: "1.0"]
+    opts = Keyword.put(serving(ctx, %{}), :app_version, "1.0")
 
-    assert Resolver.resolve(Enum, opts ++ [now: ~U[2026-11-01 00:00:00Z]]) ==
+    assert Resolver.resolve(Enum, [now: ~U[2026-11-01 00:00:00Z]] ++ opts) ==
              {:error, :update_required}
 
-    assert Resolver.resolve(Enum, opts ++ [now: ~U[2026-10-01 00:00:00Z]]) == :ok
-  end
-
-  test "with nothing installed yet, bundled code resolves without a check", ctx do
-    opts = Keyword.put(serving(ctx, %{}), :check, fn -> flunk("no check expected") end)
-
-    # stdlib's :erl_tar is on the code path but not loaded in the test VM.
-    assert Resolver.resolve(:erl_tar, opts) == :ok
-    assert :code.is_loaded(:erl_tar) != false
+    assert Resolver.resolve(Enum, [now: ~U[2026-10-01 00:00:00Z]] ++ opts) == :ok
   end
 
   test "module keys round-trip for Elixir and Erlang modules" do

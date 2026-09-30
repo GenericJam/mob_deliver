@@ -74,7 +74,12 @@ See [`decisions/2026-09-19-scope-and-wire-format.md`](decisions/2026-09-19-scope
 for the full rationale on each and the manifest-schema fields already
 reserved for them.
 
-## Installation (once shipped to Hex)
+## Installation
+
+Needs mob 0.9.6 or later (and the mob_dev that goes with it): it ships
+`config/*.exs` to the device and starts plugin OTP applications before
+their `on_start`. On older mob, mob_deliver logs why and the app runs its
+bundled code.
 
 ```elixir
 # mix.exs
@@ -97,19 +102,44 @@ config :mob_deliver,
   app: "com.example.myapp",
   endpoint: "https://updates.myapp.com",
   channel: :production,
-  # The store page, and this binary's version (read from the app bundle
-  # via Mob.Device.app_version/0 on mob that has it; set it on older mob),
-  # for the forced-update window.
-  app_version: "1.4.0",
+  # CA certificates for HTTPS; required on Android (see below).
+  req_options: [
+    connect_options: [
+      transport_opts: [cacerts: for({:cert, der, _} <- :public_key.cacerts_get(), do: der)]
+    ]
+  ],
+  # The store page for the forced-update window. This binary's version is
+  # read at runtime (Mob.Device.app_version/0); `app_version: "1.4.0"`
+  # overrides it.
   store_url: "https://apps.apple.com/app/id000000000",
   # Optional:
-  poll_interval: :timer.hours(1),  # false = only boot + push checks
-  on_push: true,                   # register the mob_wake :mob_deliver_check handler
-  stable_after: 5_000,             # ms until "first idle" if mark_stable/0 isn't called
-  # Merged into every Req request — e.g. `connect_options:
-  # [transport_opts: [cacerts: ...]]` where the BEAM has no system trust store.
-  req_options: []
+  poll_interval: :timer.hours(1),  # while in the foreground; false = only boot + push checks
+  refresh_interval: 30_000,        # min ms between manifest fetches caused by JIT misses
+  on_push: true                    # register the mob_wake :mob_deliver_check handler
 ```
+
+mob_dev evaluates `config/config.exs` (and `config/runtime.exs`, if you
+have one) **on the build machine** and ships the result with the app, so
+the values above are fixed at build time; anything you compute there runs
+on your machine, not the phone.
+
+### HTTPS on Android
+
+Android keeps its trust store behind a Java API the BEAM can't read, so
+without CA certificates every HTTPS request fails:
+`{:error, {:transport, _}}` from `MobDeliver.check/0` (for a missing trust
+store it wraps Mint's "default CA trust store not available" error).
+The `req_options` above fix that: the list comprehension runs on the build
+machine and embeds the CA certificates it trusts, DER-encoded, in the
+shipped config; rebuild to pick up trust-store changes. It's harmless on
+iOS. To pin your own CAs, list their DER certificates instead.
+
+`Mob.Certs.load_cacerts!/1` (loading a `priv/cacerts.pem` into
+`:public_key`, see its docs) also works without any `req_options`, but only
+for requests made after it runs. It runs in your app's `on_start`, which
+is *after* mob_deliver's boot-time update check has started, so that
+first check can fail and the next one is an interval away. Prefer
+`req_options`.
 
 ## Usage
 
@@ -120,10 +150,6 @@ def on_start do
   {:ok, _} = Mob.Screen.start_root(MobDeliver.root_screen(MyApp.HomeScreen))
 end
 
-# On mob without router hooks (0.9.4 and earlier) only — newer mob ends the
-# update's probation at the root screen's first paint by itself:
-MobDeliver.mark_stable()
-
 # Once per launch, e.g. in the root screen's mount:
 if MobDeliver.take_rollback_notice(), do: show_notice("Your last update failed and was rolled back.")
 
@@ -131,15 +157,27 @@ case MobDeliver.update_status() do
   {:recommended, _info} -> show_update_banner()  # its button calls MobDeliver.open_store()
   _ -> :ok
 end
-
-# On mob without router hooks only — newer mob runs this (and the update
-# gate) before every navigation by itself:
-:ok = MobDeliver.resolve(MyApp.ExpansionScreen)
 ```
 
-Update checks run at boot, every `:poll_interval`, and on a silent push
-whose data carries `"mob_wake_id": "mob_deliver_check"` (with `mob_wake`
-installed). `MobDeliver.check/0` runs one now.
+Navigating to a screen that isn't on the device just works: mob's router
+calls mob_deliver before mounting it, which fetches it (asking the server
+for its newest manifest first if the screen was published after the last
+install). That fetch runs in the router, so navigation waits for it. If it
+fails, the user stays on the current screen and a `mob_deliver:` warning
+is logged. To show a spinner or a "couldn't load" message instead, call
+`MobDeliver.resolve/1` from a `Task` before navigating (example in its
+docs); never call it inline in a screen callback, which would freeze the
+screen for the whole download. Past the forced-update deadline, any
+navigation replaces the whole stack with the update screen, so back
+can't return to a user screen.
+
+Update checks run at boot, every `:poll_interval` **while the app is in
+the foreground** (Android blocks a backgrounded app's network, so timed
+checks pause in the background and catch up on return), and on a silent
+push whose data carries `"mob_wake_id": "mob_deliver_check"` (with
+`mob_wake` installed; best effort on Android, see the
+[operator manual](guides/operator_manual.md#6-what-devices-do)).
+`MobDeliver.check/0` runs one now.
 
 ## Guides
 

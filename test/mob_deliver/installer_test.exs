@@ -14,7 +14,11 @@ defmodule MobDeliver.InstallerTest do
     watchdog = :"inst_wd_#{n}"
     start_supervised!({Store, name: store, root: root}, id: store)
     start_supervised!({SingleFlight, name: sf}, id: sf)
-    start_supervised!({Watchdog, name: watchdog, store: store}, id: watchdog)
+
+    start_supervised!({Watchdog, name: watchdog, store: store, app_version: "2.0.0"},
+      id: watchdog
+    )
+
     gate = :"inst_gate_#{n}"
     start_supervised!({Gate, name: gate, store: store}, id: gate)
     verify = &Manifest.verify(&1, key, app: "com.example.app", channel: "production")
@@ -134,6 +138,30 @@ defmodule MobDeliver.InstallerTest do
 
     assert Installer.check(opts(ctx, update, %{sha("bad") => "bad"})) == {:ok, :rejected}
     assert Store.active_id(ctx.store) == nil
+  end
+
+  test "the same modules re-published after a rollback aren't downloaded or reinstalled", ctx do
+    rolled_back = body(ctx, [{"MyApp.Home", "bad"}])
+    {:ok, manifest} = ctx.verify.(rolled_back)
+    File.mkdir_p!(ctx.root)
+
+    File.write!(
+      Path.join(ctx.root, "watchdog"),
+      :erlang.term_to_binary(%{
+        armed: nil,
+        boots: 0,
+        rejected: [Store.manifest_id(rolled_back)],
+        rejected_code: [Manifest.code_id(manifest, "2.0.0")],
+        notice: nil
+      })
+    )
+
+    republished =
+      body(ctx, [{"MyApp.Home", "bad"}], nil, %{"issued_at" => "2026-09-30T20:46:35Z"})
+
+    assert Installer.check(opts(ctx, republished, %{sha("bad") => "bad"})) == {:ok, :rejected}
+    assert Store.active_id(ctx.store) == nil
+    refute_received {:fetched, _}
   end
 
   test "an install waits while the booted update is on probation", ctx do

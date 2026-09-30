@@ -100,6 +100,23 @@ defmodule MobDeliver.Manifest do
   end
 
   @doc """
+  Identity of what a manifest makes this binary *run*: the SHA-256
+  (lowercase hex) of the canonical encoding of its `modules` map together
+  with `app_version`, the native version of the binary running it.
+
+  Unlike `content_id/1` it ignores `issued_at`, `min_app_version` and
+  `force_update_after`: re-publishing the same modules, or only moving the
+  update window, yields the same id. The native version is part of it
+  because the same BEAMs can behave differently on a different binary
+  (bundled code, NIFs).
+  """
+  @spec code_id(t(), String.t() | nil) :: String.t()
+  def code_id(%__MODULE__{modules: modules}, app_version) do
+    payload = canonical(%{"app_version" => app_version, "modules" => modules})
+    Base.encode16(:crypto.hash(:sha256, payload), case: :lower)
+  end
+
+  @doc """
   The `modules` key for `module`: `"MyApp.HomeScreen"` for Elixir modules,
   `":my_mod"` for Erlang ones (the same shape as `inspect/1`).
   """

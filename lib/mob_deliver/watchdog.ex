@@ -24,6 +24,16 @@ defmodule MobDeliver.Watchdog do
        notice), then the store rolls back to previous — which is always a
        proven manifest or bundled code, since installs wait for proof.
 
+  A rejection is recorded twice: the manifest's id (`Store.manifest_id/1`,
+  exact signed content) and its code id (`Manifest.code_id/2`: the module
+  → SHA map plus this binary's native version). Either one refuses a
+  manifest, so re-publishing the same modules with a new `issued_at` or
+  update window is refused too, while a store update of the app gives the
+  content a fresh probation. Rejections recorded before code ids existed
+  are ids only: their exact manifest stays refused, but the same modules
+  re-published get one more probation boot (and are then rejected by code
+  if they fail again).
+
   `rejected` is authoritative: any boot with a rejected manifest active
   rolls it back (so a crash mid-rollback finishes next time) and it's never
   installed again. After a rollback nothing is armed, so repeated crashes
@@ -35,18 +45,22 @@ defmodule MobDeliver.Watchdog do
 
   require Logger
 
-  alias MobDeliver.{Disk, Manifest, Store}
+  alias MobDeliver.{Config, Disk, Manifest, Store}
 
   @type server :: GenServer.server()
   @type notice :: %{rolled_back: Store.manifest_id(), at: DateTime.t()}
 
-  @empty %{armed: nil, boots: 0, rejected: [], notice: nil}
+  @empty %{armed: nil, boots: 0, rejected: [], rejected_code: [], notice: nil}
 
-  @doc "Options: `:name`, `:store` (default `MobDeliver.Store`)."
+  @doc """
+  Options: `:name`, `:store` (default `MobDeliver.Store`), `:app_version`
+  (the native version code ids are computed with; default
+  `MobDeliver.Config.app_version/0`).
+  """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) do
     name = Keyword.get(opts, :name, __MODULE__)
-    GenServer.start_link(__MODULE__, Keyword.get(opts, :store, Store), name: name)
+    GenServer.start_link(__MODULE__, opts, name: name)
   end
 
   @doc """
@@ -76,12 +90,10 @@ defmodule MobDeliver.Watchdog do
   @spec mark_stable(server()) :: :ok | {:error, term()}
   def mark_stable(server), do: GenServer.call(server, :mark_stable)
 
-  @doc "Disarms automatically after `ms` unless `mark_stable/1` came first."
-  @spec mark_stable_after(server(), non_neg_integer()) :: :ok
-  def mark_stable_after(server, ms), do: GenServer.cast(server, {:stable_after, ms})
-
-  @spec rejected?(server(), Store.manifest_id()) :: boolean()
-  def rejected?(server, id), do: GenServer.call(server, {:rejected?, id})
+  @doc "Whether this device rolled back `manifest` (with id `id`) or the same code before."
+  @spec rejected?(server(), Store.manifest_id(), Manifest.t()) :: boolean()
+  def rejected?(server, id, %Manifest{} = manifest),
+    do: GenServer.call(server, {:rejected?, id, manifest})
 
   @doc "The rollback notice, once: returns it and clears it."
   @spec take_notice(server()) :: notice() | nil
@@ -91,7 +103,15 @@ defmodule MobDeliver.Watchdog do
 
   # `booted` is the manifest this session booted under probation.
   @impl true
-  def init(store), do: {:ok, %{store: store, state: nil, booted: nil}}
+  def init(opts) do
+    {:ok,
+     %{
+       store: Keyword.get(opts, :store, Store),
+       app_version: Keyword.get_lazy(opts, :app_version, &Config.app_version/0),
+       state: nil,
+       booted: nil
+     }}
+  end
 
   @impl true
   def handle_call(request, from, %{state: nil} = s) do
@@ -105,7 +125,7 @@ defmodule MobDeliver.Watchdog do
     id = Store.manifest_id(body)
 
     cond do
-      id in s.state.rejected -> {:reply, {:ok, :rejected}, s}
+      refused?(s, id, manifest) -> {:reply, {:ok, :rejected}, s}
       id == Store.active_id(s.store) -> {:reply, {:ok, :current}, s}
       s.state.armed != nil -> {:reply, {:ok, :deferred}, s}
       true -> transact_install(s, id, body, manifest, expected)
@@ -124,7 +144,8 @@ defmodule MobDeliver.Watchdog do
     {:reply, reply, s}
   end
 
-  def handle_call({:rejected?, id}, _from, s), do: {:reply, id in s.state.rejected, s}
+  def handle_call({:rejected?, id, manifest}, _from, s),
+    do: {:reply, refused?(s, id, manifest), s}
 
   def handle_call(:take_notice, _from, s) do
     case s.state.notice do
@@ -135,24 +156,6 @@ defmodule MobDeliver.Watchdog do
         # If clearing can't be persisted the notice may show again next launch.
         {_, s} = write(s, %{s.state | notice: nil})
         {:reply, notice, s}
-    end
-  end
-
-  @impl true
-  def handle_cast({:stable_after, ms}, s) do
-    Process.send_after(self(), :stable, ms)
-    {:noreply, s}
-  end
-
-  @impl true
-  def handle_info(:stable, s) do
-    case load(s) do
-      {:ok, s} ->
-        {_, s} = disarm_if_booted(s)
-        {:noreply, s}
-
-      {:error, _} ->
-        {:noreply, s}
     end
   end
 
@@ -178,12 +181,16 @@ defmodule MobDeliver.Watchdog do
     end
   end
 
-  defp load(s), do: {:ok, s}
-
   defp unreadable_reply(:ready?, _reason), do: false
-  defp unreadable_reply({:rejected?, _id}, _reason), do: true
+  defp unreadable_reply({:rejected?, _id, _manifest}, _reason), do: true
   defp unreadable_reply(:take_notice, _reason), do: nil
   defp unreadable_reply(_request, reason), do: {:error, {:watchdog_unreadable, reason}}
+
+  defp refused?(s, id, manifest) do
+    id in s.state.rejected or code_id(s, manifest) in s.state.rejected_code
+  end
+
+  defp code_id(s, manifest), do: Manifest.code_id(manifest, s.app_version)
 
   defp transact_install(s, id, body, manifest, expected) do
     with {:ok, armed} <- write(s, %{s.state | armed: id, boots: 0}) do
@@ -219,19 +226,26 @@ defmodule MobDeliver.Watchdog do
 
   # `budget` bounds rollbacks per boot (there are only two slots).
   defp check_boot(s, verify, budget) do
-    active = Store.active_id(s.store)
+    {active, manifest} = Store.active(s.store) || {nil, nil}
     state = s.state
 
     cond do
-      active != nil and budget > 0 and active in state.rejected ->
+      active != nil and budget > 0 and refused?(s, active, manifest) ->
         roll_back(s, active, verify, budget)
 
       active != nil and budget > 0 and state.armed == active and state.boots >= 1 ->
         Logger.warning("mob_deliver: manifest #{active} never reached first idle; rolling back")
-        rejected = [active | state.rejected]
-        notice = %{rolled_back: active, at: DateTime.utc_now()}
 
-        case write(s, %{state | armed: nil, boots: 0, rejected: rejected, notice: notice}) do
+        rejected = %{
+          state
+          | armed: nil,
+            boots: 0,
+            rejected: [active | state.rejected],
+            rejected_code: [code_id(s, manifest) | state.rejected_code],
+            notice: %{rolled_back: active, at: DateTime.utc_now()}
+        }
+
+        case write(s, rejected) do
           {:ok, s} -> roll_back(s, active, verify, budget)
           {error, s} -> error_reply(error, s)
         end
@@ -275,14 +289,16 @@ defmodule MobDeliver.Watchdog do
 
   defp read(store) do
     case Disk.read_term(path(store)) do
-      {:ok, %{armed: armed, boots: boots, rejected: rejected, notice: notice}}
+      {:ok, %{armed: armed, boots: boots, rejected: rejected, notice: notice} = state}
       when (is_binary(armed) or is_nil(armed)) and is_integer(boots) and is_list(rejected) and
              (is_map(notice) or is_nil(notice)) ->
         {:ok,
          %{
            armed: armed,
            boots: boots,
-           rejected: Enum.filter(rejected, &is_binary/1),
+           rejected: strings(rejected),
+           # Absent in state written before code ids existed.
+           rejected_code: strings(Map.get(state, :rejected_code, [])),
            notice: notice
          }}
 
@@ -299,6 +315,9 @@ defmodule MobDeliver.Watchdog do
         error
     end
   end
+
+  defp strings(list) when is_list(list), do: Enum.filter(list, &is_binary/1)
+  defp strings(_), do: []
 
   # Memory follows disk: on failure the old state stays in effect.
   defp write(s, state) do

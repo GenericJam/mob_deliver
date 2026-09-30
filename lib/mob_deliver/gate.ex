@@ -17,10 +17,11 @@ defmodule MobDeliver.Gate do
   (lower `issued_at`) can't replace a newer one to lift the gate.
 
   The app's own version is `config :mob_deliver, :app_version` if set,
-  else the native store version from `Mob.Device.app_version()` (mob with
-  that accessor). If it — or the
-  floor — isn't a dotted numeric version, the gate stays open and logs
-  why: it's an update prompt, not a security boundary.
+  else the native store version from `Mob.Device.app_version()`. If it —
+  or the floor — isn't a dotted numeric version, the gate stays open: it's
+  an update prompt, not a security boundary. That's logged as a warning
+  naming the offending side whenever such a manifest is recorded or
+  reloaded.
   """
 
   use GenServer
@@ -39,8 +40,10 @@ defmodule MobDeliver.Gate do
 
   @doc """
   Options: `:name`, `:store` (whose root holds the gate file), `:verify`
-  (default: this build's trusted key, app, and channel). The persisted gate is reloaded
-  and re-verified on every start, so a restart never opens it.
+  (default: this build's trusted key, app, and channel), `:app_version`
+  (for the unparseable-version warning; default
+  `MobDeliver.Config.app_version/0`). The persisted gate is reloaded and
+  re-verified on every start, so a restart never opens it.
   """
   @spec start_link(keyword()) :: GenServer.on_start()
   def start_link(opts) do
@@ -106,14 +109,10 @@ defmodule MobDeliver.Gate do
           do: {:required, info},
           else: {:recommended, info}
 
-      {:ok, _} ->
-        :ok
-
-      :error ->
-        Logger.warning(
-          "mob_deliver: can't compare app version #{inspect(app_version)} with #{inspect(min)}; update gate open"
-        )
-
+      # Either side unparseable (:error) leaves the gate open. That's logged
+      # when the manifest is recorded or reloaded, not here: this runs on
+      # every navigation.
+      _at_or_above_or_uncomparable ->
         :ok
     end
   end
@@ -157,7 +156,13 @@ defmodule MobDeliver.Gate do
   @impl true
   def init({name, opts}) do
     :ets.new(table(name), [:named_table, :protected, read_concurrency: true])
-    s = %{table: table(name), store: Keyword.get(opts, :store, Store)}
+
+    s = %{
+      table: table(name),
+      store: Keyword.get(opts, :store, Store),
+      app_version: Keyword.get_lazy(opts, :app_version, &Config.app_version/0)
+    }
+
     load(s, Keyword.get_lazy(opts, :verify, &MobDeliver.Boot.verifier/0))
     {:ok, s}
   end
@@ -168,6 +173,7 @@ defmodule MobDeliver.Gate do
     with {:ok, body} <- Disk.read(path(s)),
          {:ok, manifest} <- verify.(body) do
       :ets.insert(s.table, {:latest, manifest})
+      warn_uncomparable(manifest, s.app_version)
     else
       {:error, :missing} ->
         :ok
@@ -191,9 +197,31 @@ defmodule MobDeliver.Gate do
     if newer? do
       # A verified floor applies at once, persisted or not.
       :ets.insert(s.table, {:latest, manifest})
+      warn_uncomparable(manifest, s.app_version)
       {:reply, Disk.atomic_write(path(s), body), s}
     else
       {:reply, :ok, s}
+    end
+  end
+
+  defp warn_uncomparable(%Manifest{min_app_version: nil}, _app_version), do: :ok
+
+  defp warn_uncomparable(%Manifest{min_app_version: min}, app_version) do
+    cond do
+      segments(min) == :error ->
+        Logger.warning(
+          "mob_deliver: the manifest's min_app_version #{inspect(min)} isn't a dotted numeric " <>
+            "version like \"1.4.0\"; the update gate stays open (fix it where you publish)"
+        )
+
+      segments(app_version) == :error ->
+        Logger.warning(
+          "mob_deliver: this app's version #{inspect(app_version)} isn't a dotted numeric " <>
+            "version like \"1.4.0\"; the update gate stays open (set config :mob_deliver, :app_version)"
+        )
+
+      true ->
+        :ok
     end
   end
 

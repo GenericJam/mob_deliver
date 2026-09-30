@@ -24,13 +24,6 @@ defmodule MobDeliver.Config do
       )
   end
 
-  @doc """
-  How long after boot the app counts as stable if it doesn't call
-  `MobDeliver.mark_stable/0` first (default 5s).
-  """
-  @spec stable_after() :: non_neg_integer()
-  def stable_after, do: get(:stable_after) || 5_000
-
   @doc "Update-check interval in ms (default one hour); `false` disables timed checks."
   @spec poll_interval() :: pos_integer() | false
   def poll_interval do
@@ -40,22 +33,39 @@ defmodule MobDeliver.Config do
     end
   end
 
+  @doc """
+  Minimum ms between manifest fetches triggered by JIT misses (default
+  30s); within it, misses reuse the last result.
+  """
+  @spec refresh_interval() :: non_neg_integer()
+  def refresh_interval, do: get(:refresh_interval) || 30_000
+
   # This binary's store version, for the update gate: `config :mob_deliver,
   # :app_version` if set, else `Mob.Device.app_version/0` (mob with the
   # native accessor), else `nil`, which leaves the gate open.
   @spec app_version() :: String.t() | nil
   def app_version, do: get(:app_version) || native_app_version()
 
-  @device Mob.Device
+  @native_version {__MODULE__, :native_app_version}
 
-  # Called dynamically: the accessor is newer than the mob this compiles
-  # against, and off-device its NIF isn't loaded.
+  # The running binary's version never changes within a VM, so it's read
+  # once. Off-device mob's NIF isn't loaded: nil.
   defp native_app_version do
-    if Code.ensure_loaded?(@device) and function_exported?(@device, :app_version, 0) do
-      case apply(@device, :app_version, []) do
-        version when is_binary(version) and version != "" -> version
-        _ -> nil
-      end
+    case :persistent_term.get(@native_version, :unread) do
+      :unread ->
+        version = read_native_app_version()
+        :persistent_term.put(@native_version, version)
+        version
+
+      version ->
+        version
+    end
+  end
+
+  defp read_native_app_version do
+    case Mob.Device.app_version() do
+      version when is_binary(version) and version != "" -> version
+      _ -> nil
     end
   catch
     _, _ -> nil
@@ -82,6 +92,23 @@ defmodule MobDeliver.Config do
       trusted_publish_key: trusted_publish_key(),
       req_options: get(:req_options) || []
     ]
+  end
+
+  @doc """
+  The settings update checks can't run without, if unset. On a device
+  `config :mob_deliver` only exists if the build shipped the app config
+  (mob >= 0.9.6 with its mob_dev); `trusted_publish_key` is compiled in.
+  """
+  @spec missing() :: [atom()]
+  def missing do
+    required = [
+      trusted_publish_key: trusted_publish_key(),
+      endpoint: get(:endpoint),
+      app: app(),
+      channel: channel()
+    ]
+
+    for {key, nil} <- required, do: key
   end
 
   @spec get(atom()) :: term()

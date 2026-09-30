@@ -3,6 +3,8 @@ defmodule MobDeliver.ClientTest do
 
   alias MobDeliver.{Client, Manifest, TestPublisher}
 
+  @moduletag :capture_log
+
   setup do
     {key, private} = TestPublisher.keypair()
 
@@ -69,6 +71,39 @@ defmodule MobDeliver.ClientTest do
 
     assert {:error, {:transport, %Req.TransportError{reason: :econnrefused}}} =
              Client.fetch_manifest(opts)
+  end
+
+  test "a request that raises (e.g. no CA certs for HTTPS) is a transport error", %{opts: opts} do
+    Req.Test.stub(Client, fn _conn ->
+      raise "default CA trust store not available; please add `:castore`"
+    end)
+
+    assert {:error, {:transport, %RuntimeError{message: "default CA trust store" <> _}}} =
+             Client.fetch_manifest(opts)
+
+    assert {:error, {:transport, %RuntimeError{}}} = Client.fetch_beam(TestPublisher.sha(), opts)
+  end
+
+  test "without an endpoint, app or channel nothing is fetched, and the log says which",
+       %{opts: opts} do
+    Req.Test.stub(Client, fn conn ->
+      send(self(), :requested)
+      Plug.Conn.send_resp(conn, 500, "")
+    end)
+
+    for key <- [:endpoint, :app, :channel] do
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert Client.fetch_manifest(Keyword.put(opts, key, nil)) == {:error, :not_configured}
+        end)
+
+      assert log =~ "not configured (#{inspect(key)} unset"
+    end
+
+    assert Client.fetch_beam(TestPublisher.sha(), Keyword.put(opts, :endpoint, nil)) ==
+             {:error, :not_configured}
+
+    refute_received :requested
   end
 
   test "without a trusted key nothing is fetched", %{opts: opts} do

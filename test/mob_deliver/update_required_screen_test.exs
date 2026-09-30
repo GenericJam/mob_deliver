@@ -18,6 +18,33 @@ defmodule MobDeliver.UpdateRequiredScreenTest do
     assert_renderable(view)
 
     Application.delete_env(:mob_deliver, :store_url)
-    refute UpdateRequiredScreen |> mount_screen() |> find(:button)
+    view = mount_screen(UpdateRequiredScreen)
+    refute find(view, :button)
+    assert text(view) =~ "App Store or Google Play"
+    assert_renderable(view)
+  end
+
+  test "every text is readable on the screen's background in dark and light themes" do
+    Application.delete_env(:mob_deliver, :store_url)
+    tree = UpdateRequiredScreen |> mount_screen() |> tree()
+
+    for theme <- [Mob.Theme.Dark.theme(), Mob.Theme.Light.theme()] do
+      background = argb(theme, tree.props[:background])
+      assert is_integer(background)
+
+      for %{type: :text, props: props} <- flatten(tree) do
+        text = argb(theme, props[:text_color])
+        assert is_integer(text), "#{inspect(props.text)} has no theme colour"
+        assert text != background, "#{inspect(props.text)} is invisible"
+      end
+    end
+  end
+
+  # A colour token through the theme's semantic map, then the base palette.
+  defp argb(theme, token) do
+    colors = Mob.Theme.color_map(theme)
+    palette = Mob.Renderer.colors()
+    resolved = Map.get(colors, token, token)
+    if is_integer(resolved), do: resolved, else: Map.get(palette, resolved)
   end
 end
