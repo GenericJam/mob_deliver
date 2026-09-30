@@ -55,9 +55,9 @@ defmodule MobDeliver.MixProject do
 
   defp deps do
     [
-      # The host framework. Client uses Mob.Screen callbacks, Code.load_binary,
-      # Mob.data_dir/0, and (when activated) mob_wake for background triggers.
-      {:mob, "~> 0.9", only: [:dev, :test], runtime: false},
+      # The host framework (Mob.data_dir/1, Mob.Device, Mob.Screen). Every mob
+      # app already depends on and starts :mob, so it's compile-time here.
+      {:mob, "~> 0.9", runtime: false},
       # Plugin manifest validator lives here. Dev/test only — the host app
       # supplies mob_dev at build time.
       {:mob_dev, "~> 0.6", only: [:dev, :test], runtime: false},

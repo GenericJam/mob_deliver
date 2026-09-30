@@ -1,0 +1,52 @@
+defmodule MobDeliver.Config do
+  @moduledoc false
+  # One place that reads `config :mob_deliver, ...`. Everything except the
+  # trusted key is runtime config; the key is baked in at compile time so the
+  # trust root ships inside the reviewed binary.
+
+  @trusted_publish_key Application.compile_env(:mob_deliver, :trusted_publish_key)
+
+  @spec trusted_publish_key() :: String.t() | nil
+  def trusted_publish_key, do: @trusted_publish_key
+
+  @doc """
+  Root directory of the on-device store: `<data dir>/mob_deliver` unless
+  configured. Resolves the path like `Mob.data_dir/0` but without its
+  `mkdir_p!`, so a filesystem problem surfaces as `{:error, _}` from store
+  writes instead of crashing application start.
+  """
+  @spec root() :: Path.t()
+  def root do
+    get(:root) ||
+      Path.join(
+        System.get_env("MOB_DATA_DIR") || System.get_env("HOME") || File.cwd!(),
+        "mob_deliver"
+      )
+  end
+
+  @spec app() :: String.t() | nil
+  def app, do: get(:app)
+
+  @spec channel() :: String.t() | nil
+  def channel do
+    case get(:channel) do
+      nil -> nil
+      channel -> to_string(channel)
+    end
+  end
+
+  @doc "Options for `MobDeliver.Client` calls."
+  @spec client_opts() :: keyword()
+  def client_opts do
+    [
+      endpoint: get(:endpoint),
+      app: app(),
+      channel: channel(),
+      trusted_publish_key: trusted_publish_key(),
+      req_options: get(:req_options) || []
+    ]
+  end
+
+  @spec get(atom()) :: term()
+  def get(key), do: Application.get_env(:mob_deliver, key)
+end

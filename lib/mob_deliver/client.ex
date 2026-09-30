@@ -41,32 +41,48 @@ defmodule MobDeliver.Client do
     end
   end
 
+  @doc """
+  Fetches the `.beam` for `sha` (`GET /beam/:sha256`). The bytes are
+  unverified here; `MobDeliver.Store.put_blob/3` checks them against `sha`
+  before anything can use them.
+  """
+  @spec fetch_beam(String.t(), [option()]) :: {:ok, binary()} | {:error, error()}
+  def fetch_beam(sha, opts) do
+    case request(opts, method: :get, url: url(opts, "/beam/" <> sha)) do
+      {:ok, body} -> {:ok, body}
+      {:error, _} = error -> error
+    end
+  end
+
   defp request_manifest(trusted_key, opts) do
     app = Keyword.fetch!(opts, :app)
     channel = opts |> Keyword.fetch!(:channel) |> to_string()
 
+    request_opts = [
+      method: :post,
+      url: url(opts, "/manifest"),
+      headers: [accept: @accept, content_type: "application/json"],
+      body: JSON.encode!(%{"app" => app, "channel" => channel})
+    ]
+
+    with {:ok, body} <- request(opts, request_opts) do
+      Manifest.verify(body, trusted_key, app: app, channel: channel)
+    end
+  end
+
+  defp url(opts, path), do: String.trim_trailing(Keyword.fetch!(opts, :endpoint), "/") <> path
+
+  defp request(opts, request_opts) do
     req =
-      Req.new(
-        [
-          method: :post,
-          url: String.trim_trailing(Keyword.fetch!(opts, :endpoint), "/") <> "/manifest",
-          headers: [accept: @accept, content_type: "application/json"],
-          body: JSON.encode!(%{"app" => app, "channel" => channel}),
-          decode_body: false,
-          retry: false
-        ]
-        |> Keyword.merge(Keyword.get(opts, :req_options, []))
-      )
+      [decode_body: false, retry: false]
+      |> Keyword.merge(request_opts)
+      |> Keyword.merge(Keyword.get(opts, :req_options, []))
+      |> Req.new()
 
     case Req.request(req) do
-      {:ok, %Req.Response{status: 200, body: body}} ->
-        Manifest.verify(body, trusted_key, app: app, channel: channel)
-
-      {:ok, %Req.Response{status: status}} ->
-        {:error, {:http_status, status}}
-
-      {:error, exception} ->
-        {:error, {:transport, exception}}
+      {:ok, %Req.Response{status: 200, body: body}} -> {:ok, body}
+      {:ok, %Req.Response{status: status}} -> {:error, {:http_status, status}}
+      {:error, exception} -> {:error, {:transport, exception}}
     end
   end
 end

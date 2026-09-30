@@ -81,6 +81,26 @@ defmodule MobDeliver.Manifest do
     fields |> Map.delete("signature") |> canonical() |> IO.iodata_to_binary()
   end
 
+  @doc """
+  The `modules` key for `module`: `"MyApp.HomeScreen"` for Elixir modules,
+  `":my_mod"` for Erlang ones (the same shape as `inspect/1`).
+  """
+  @spec module_key(module()) :: String.t()
+  def module_key(module) when is_atom(module) do
+    case Atom.to_string(module) do
+      "Elixir." <> name -> name
+      name -> ":" <> name
+    end
+  end
+
+  @doc """
+  Inverse of `module_key/1`. Creates the atom, so only call it with keys
+  from a verified manifest.
+  """
+  @spec key_module(String.t()) :: module()
+  def key_module(":" <> name), do: String.to_atom(name)
+  def key_module(name), do: String.to_atom("Elixir." <> name)
+
   defp canonical(map) when is_map(map) do
     entries =
       map

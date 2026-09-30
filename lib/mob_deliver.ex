@@ -74,11 +74,7 @@ defmodule MobDeliver do
   already in place to let each one land as an additive change later.
   """
 
-  alias MobDeliver.Client
-
-  # Baked in at compile time: the trust root ships inside the reviewed binary
-  # and can't be swapped by anything delivered later.
-  @trusted_publish_key Application.compile_env(:mob_deliver, :trusted_publish_key)
+  alias MobDeliver.{Client, Config}
 
   @doc """
   Fetches the current manifest for this app + channel and verifies its
@@ -96,11 +92,23 @@ defmodule MobDeliver do
   when no key was configured at build time.
   """
   @spec fetch_manifest() :: {:ok, MobDeliver.Manifest.t()} | {:error, Client.error()}
-  def fetch_manifest do
-    :mob_deliver
-    |> Application.get_all_env()
-    |> Keyword.take([:app, :endpoint, :channel, :req_options])
-    |> Keyword.put(:trusted_publish_key, @trusted_publish_key)
-    |> Client.fetch_manifest()
-  end
+  def fetch_manifest, do: Client.fetch_manifest(Config.client_opts())
+
+  @doc """
+  Makes `module` callable, fetching it on a cache miss (JIT delivery).
+
+    * Already loaded → `:ok` immediately (no store or network access).
+    * In the active manifest → fetches its `.beam` unless stored locally,
+      checks it against the manifest SHA and that it defines `module`,
+      then loads it — together with every delivered module it calls that
+      isn't loaded yet, so the whole call closure is present.
+    * Otherwise → `Code.ensure_loaded/1` (bundled code), or
+      `{:error, :not_found}`.
+
+  Concurrent calls for the same module share one fetch. Never kills
+  processes to load: if an old version is still running,
+  `{:error, :old_code_in_use}`.
+  """
+  @spec resolve(module()) :: :ok | {:error, term()}
+  def resolve(module), do: MobDeliver.Resolver.resolve(module)
 end

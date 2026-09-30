@@ -20,17 +20,20 @@ An on-device content-addressed BEAM store (SHA-256 → `.beam` blob) plus two tr
 
 ## Anatomy of the plugin
 
-* `lib/mob_deliver.ex` — public API. `fetch_manifest/0` (reads config; trusted key via `compile_env`); `resolve/1`, `check/0`, etc. land with their issues.
+* `lib/mob_deliver.ex` — public API. `fetch_manifest/0`, `resolve/1`; `check/0` etc. land with their issues.
 * `lib/mob_deliver/manifest.ex` — wire format v1 manifest: canonical signing payload, Ed25519 verification, typed parse. Signature is checked before any field is read.
-* `lib/mob_deliver/client.ex` — `POST /manifest` over Req (retries + body decoding off; TLS options via `:req_options`).
+* `lib/mob_deliver/client.ex` — `POST /manifest`, `GET /beam/:sha` over Req (retries + body decoding off; TLS options via `:req_options`).
+* `lib/mob_deliver/store.ex` — content-addressed store: `blobs/<sha>` (re-hashed on every read; a corrupt file is reported, never unlinked — that could delete a concurrent repair) and a `state` file holding the active/previous **signed manifest bodies** (not references), so replacing it is the one atomic slot switch and nothing in it is used unverified. Boot re-verifies, falls back active → previous → bundled, and persists the outcome. The process's in-memory slots are the compare-and-set truth for `activate/4`/`rollback/3`, so `active_id/1` is always a working token even if a persist failed.
+* `lib/mob_deliver/disk.ex` — tmp → fsync → rename → fsync(dir) writes, durable directory creation (every new dir's parent synced). Post-rename sync failure counts as committed (logged). Never raises.
+* `lib/mob_deliver/resolver.ex` + `loader.ex` — JIT `resolve/1`. Pins **one** active manifest for the whole call closure (from the beam's imports chunk), fetches everything before loading anything, loads callees first and the target last (a failed callee leaves the target unloaded and retryable), checks the beam defines the named module, and never kills processes to purge old code.
+* `lib/mob_deliver/single_flight.ex` — collapses concurrent calls per key into one execution (rule 4). Runners are linked and killed in `terminate/2`, so a restarted registry never overlaps them.
+* `lib/mob_deliver/config.ex` — the only reader of `config :mob_deliver` (trusted key via `compile_env`; store root defaults to `<MOB_DATA_DIR>/mob_deliver`, resolved without `mkdir_p!` so app start can't crash on the filesystem).
 * `priv/mob_plugin.exs` — plugin manifest. No NIFs (pure Elixir). Lifecycle `on_start` initialises the content-addressed store + arms the watchdog.
 * `decisions/` — ADRs. **Read `2026-09-19-scope-and-wire-format.md` first.** Everything else in the repo defers to it.
-* `test/` — manifest verification invariants (tamper/forgery/cross-channel/canonical payload golden vector) and client wire behaviour via `Req.Test`. `test/test_helper.exs` defines `MobDeliver.TestPublisher`, the signing side of the wire. Store atomicity + watchdog property tests land with their issues.
+* `test/` — manifest verification invariants (tamper/forgery/cross-channel/canonical payload golden vector), client wire behaviour via `Req.Test`, store crash/tamper/CAS cases, resolver closure/ordering/pinning with real compiled BEAMs served by a function plug. `test/test_helper.exs` defines `MobDeliver.TestPublisher`, the signing side of the wire.
 
 Not yet present (deferred to implementation issues):
-* `lib/mob_deliver/store.ex` — on-device content-addressed store (open ETS table + on-disk directory keyed by SHA).
 * `lib/mob_deliver/watchdog.ex` — slot-based rollback state machine.
-* `lib/mob_deliver/router.ex` — `resolve/1` cache-miss fetch for the router.
 * `lib/mob_deliver/poller.ex` — schedule/silent-push-triggered manifest checks.
 * `lib/mob_deliver/gate.ex` — `min_app_version` + `force_update_after` UX gate.
 

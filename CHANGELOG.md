@@ -21,10 +21,16 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
   malformed, or mismatched signature, and on a signed manifest for a
   different app or channel. The canonical signing payload is specified
   in the ADR.
+- `MobDeliver.Store` — on-device content-addressed store: SHA-verified
+  blobs, signed manifest bodies re-verified at boot (active → previous →
+  bundled fallback), slots switched by one atomic, durable state-file
+  write with compare-and-set. `MobDeliver.SingleFlight` collapses
+  concurrent work per key.
+- `MobDeliver.resolve/1` — JIT delivery of a module and the delivered
+  modules it calls, from one pinned manifest, callees loaded before the
+  target; single-flight per module and per blob.
 
 ### Not yet
-- Content-addressed on-device store implementation.
-- `MobDeliver.resolve/1` router-integration API.
 - Slot-based watchdog + rollback.
 - Forced-update window UX.
 - `mob_deliver_server` companion library.
