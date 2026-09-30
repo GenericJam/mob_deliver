@@ -154,7 +154,9 @@ defmodule MobDeliver do
   Plugin lifecycle `on_start` (see `priv/mob_plugin.exs`). Runs before the
   app's own `on_start`: re-verifies the stored manifest, rolls back one
   that never reached first idle, loads the delivered modules already on
-  the device, and starts the stability timer. Never raises; on any
+  the device, and hooks into mob's router (JIT fetch + update gate before
+  navigation, probation ends at first paint) — or, on mob without router
+  hooks, starts the stability timer. Never raises; on any
   failure the app runs its bundled code.
   """
   @spec on_start() :: :ok

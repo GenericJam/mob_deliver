@@ -61,10 +61,17 @@ defmodule MobDeliver.Boot do
   end
 
   defp start_services(watchdog, opts) do
-    Watchdog.mark_stable_after(
-      watchdog,
-      Keyword.get_lazy(opts, :stable_after, &Config.stable_after/0)
-    )
+    # With mob's router hooks, first idle is the root screen's first paint
+    # and navigation resolves/gates itself; without them, first idle falls
+    # back to a timer and the app calls resolve/1 and root_screen/2.
+    hooked? = Keyword.get(opts, :router_hooks, true) and MobDeliver.Hooks.register()
+
+    unless hooked? do
+      Watchdog.mark_stable_after(
+        watchdog,
+        Keyword.get_lazy(opts, :stable_after, &Config.stable_after/0)
+      )
+    end
 
     # `poller: nil` skips update checks (tests).
     if poller = Keyword.get(opts, :poller, Poller) do

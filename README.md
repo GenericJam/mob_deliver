@@ -119,7 +119,8 @@ def on_start do
   {:ok, _} = Mob.Screen.start_root(MobDeliver.root_screen(MyApp.HomeScreen))
 end
 
-# In the root screen, once it has rendered: ends the update's probation.
+# On mob without router hooks (0.9.4 and earlier) only — newer mob ends the
+# update's probation at the root screen's first paint by itself:
 MobDeliver.mark_stable()
 
 # Once per launch, e.g. in the root screen's mount:
@@ -130,8 +131,8 @@ case MobDeliver.update_status() do
   _ -> :ok
 end
 
-# Before navigating to a screen that may not be on the device yet
-# (until mob's router calls it itself, mob_deliver-g90):
+# On mob without router hooks only — newer mob runs this (and the update
+# gate) before every navigation by itself:
 :ok = MobDeliver.resolve(MyApp.ExpansionScreen)
 ```
 

@@ -49,6 +49,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 - Blob cleanup at boot (`MobDeliver.Store.gc/1`): blobs referenced by
   neither the active nor the previous manifest, and temp files from
   interrupted writes, are deleted before update checks start.
+- Router integration (`MobDeliver.Hooks`): on mob with `Mob.Router.Hooks`,
+  every push/reset runs `resolve/1` first (JIT fetch; redirect to the
+  update screen past the deadline, `:update_screen` configurable), and the
+  root screen's first paint ends the update's probation. Older mob keeps
+  the stability timer and app-side `resolve/1`.
 
 ### Not yet
 - `mob_deliver_server` companion library.
