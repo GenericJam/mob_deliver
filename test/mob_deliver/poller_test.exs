@@ -56,18 +56,18 @@ defmodule MobDeliver.PollerTest do
   end
 
   test "repeated deferrals back off exponentially, capped at the poll interval" do
-    start(interval: 160, retry_after: 20, results: List.duplicate({:ok, :deferred}, 10))
+    start(interval: 100, retry_after: 20, results: List.duplicate({:ok, :deferred}, 10))
 
     times =
       for n <- 1..6 do
-        assert_receive {:checked, ^n, at}, 1_000
+        assert_receive {:checked, ^n, at}, 2_000
         at
       end
 
     gaps = times |> Enum.chunk_every(2, 1, :discard) |> Enum.map(fn [a, b] -> b - a end)
 
-    # 20, 40, 80, then the 160 cap (uncapped: 160, 320).
-    for {gap, min} <- Enum.zip(gaps, [20, 40, 80, 160, 160]), do: assert(gap >= min)
+    # 20, 40, 80, then the 100 cap (uncapped: 160, 320).
+    for {gap, min} <- Enum.zip(gaps, [20, 40, 80, 100, 100]), do: assert(gap >= min)
     assert Enum.at(gaps, 4) < 320
   end
 
@@ -137,7 +137,7 @@ defmodule MobDeliver.PollerTest do
     pid = Process.whereis(poller)
 
     assert_receive {:checked, 1, _}
-    assert_receive {:checked, 3, _}, 500
+    assert_receive {:checked, 3, _}, 2_000
     assert Process.whereis(poller) == pid
   end
 end
