@@ -314,6 +314,65 @@ defmodule MobDeliver.InstallerTest do
     assert Store.has_blob?(ctx.store, sha("helper"))
   end
 
+  # One launch over the same store: a fresh watchdog that boots and records
+  # what that launch loads.
+  defp launch(ctx, loads) do
+    name = :"inst_wd_launch_#{System.unique_integer([:positive])}"
+    start_supervised!({Watchdog, name: name, store: ctx.store, app_version: "2.0.0"}, id: name)
+    outcome = Watchdog.on_boot(name, ctx.verify)
+    :ok = Watchdog.note_loaded(name, loads)
+    {name, outcome}
+  end
+
+  test "screens fetched in earlier sessions don't shield a broken module that a failed update shipped",
+       ctx do
+    keys = ["MyApp.Home", "MyApp.Greeting", "MyApp.LateScreen", "MyApp.Late2Screen"]
+    [home, greeting, late, late2] = keys
+    activate!(ctx, body(ctx, [{home, "home"}, {greeting, "greeting 1"}]))
+
+    # An earlier, proven session fetched and ran the late screens.
+    for bytes <- ["late 1", "late2 1"], do: :ok = Store.put_blob(ctx.store, sha(bytes), bytes)
+
+    v6 = [{home, "home"}, {greeting, "broken"}, {late, "late 1"}, {late2, "late2 1"}]
+
+    blobs =
+      Map.new(["home", "broken", "greeting 2", "late 1", "late 2", "late2 1"], &{sha(&1), &1})
+
+    assert Installer.check(opts(ctx, body(ctx, v6), blobs)) == {:ok, :installed}
+
+    # The probation launch loads everything local and dies on Greeting.
+    {_, {:ok, :armed}} = launch(ctx, Map.new(v6, fn {k, b} -> {k, sha(b)} end))
+    {next, {:ok, :rolled_back}} = launch(ctx, %{})
+
+    # The device run's follow-up: only LateScreen edited.
+    v7 = body(ctx, [{home, "home"}, {greeting, "broken"}, {late, "late 2"}, {late2, "late2 1"}])
+    assert Installer.check(opts(ctx, v7, blobs, watchdog: next)) == {:ok, :rejected}
+
+    fixed =
+      body(ctx, [{home, "home"}, {greeting, "greeting 2"}, {late, "late 2"}, {late2, "late2 1"}])
+
+    assert Installer.check(opts(ctx, fixed, blobs, watchdog: next)) == {:ok, :installed}
+  end
+
+  test "a manifest that only moves the update window is active at once, and doesn't hold up the next update",
+       ctx do
+    active = body(ctx, [{"MyApp.Home", "home"}])
+    activate!(ctx, active)
+    blobs = %{sha("home") => "home", sha("home 2") => "home 2"}
+
+    window =
+      body(ctx, [{"MyApp.Home", "home"}], nil, %{
+        "issued_at" => "2026-09-30T00:00:00Z",
+        "min_app_version" => "1.0"
+      })
+
+    assert Installer.check(opts(ctx, window, blobs)) == {:ok, :installed}
+    assert Store.active_id(ctx.store) == Store.manifest_id(window)
+
+    update = body(ctx, [{"MyApp.Home", "home 2"}], nil, %{"issued_at" => "2026-10-01T00:00:00Z"})
+    assert Installer.check(opts(ctx, update, blobs)) == {:ok, :installed}
+  end
+
   test "keys of modules this device has never heard of don't create atoms", ctx do
     unheard_of = "MobDeliverUnheardOf#{System.unique_integer([:positive])}xyz.Screen"
     update = body(ctx, [{unheard_of, "bytes"}])

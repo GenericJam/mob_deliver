@@ -42,7 +42,7 @@ defmodule MobDeliver.Installer do
       expected = Store.active_id(opts[:store])
 
       # Cheap pre-checks so nothing is downloaded for an install that can't
-      # happen; Watchdog.install/4 re-checks the watchdog ones atomically.
+      # happen; Watchdog.install/5 re-checks the watchdog ones atomically.
       cond do
         id == expected -> {:ok, :current}
         not Gate.installable?(manifest, opts[:app_version]) -> {:ok, :below_min_version}
@@ -64,11 +64,16 @@ defmodule MobDeliver.Installer do
   end
 
   # Everything the next boot will load is on disk before the slot switches:
-  # a half-fetched update never becomes active.
+  # a half-fetched update never becomes active. Which of its new module
+  # versions were on the device before (fetched for an earlier manifest or
+  # session) is noted first: if the update is rolled back, those weren't
+  # brought by it and aren't suspects.
   defp install(id, body, manifest, expected, opts) do
+    preexisting = preexisting(manifest, opts)
+
     with :ok <- prefetch(manifest, opts),
          {:ok, :installed} = installed <-
-           Watchdog.install(opts[:watchdog], body, manifest, expected) do
+           Watchdog.install(opts[:watchdog], body, manifest, expected, preexisting) do
       Logger.info(
         "mob_deliver: installed manifest #{id}; modules this session already runs " <>
           "switch to it at the next launch, others load from it on first use"
@@ -76,6 +81,20 @@ defmodule MobDeliver.Installer do
 
       installed
     end
+  end
+
+  defp preexisting(%Manifest{modules: modules}, opts) do
+    current =
+      case Store.active(opts[:store]) do
+        {_id, %Manifest{modules: active}} -> active
+        nil -> %{}
+      end
+
+    for {key, sha} <- modules,
+        Map.get(current, key) != sha,
+        Store.has_blob?(opts[:store], sha),
+        into: %{},
+        do: {key, sha}
   end
 
   # New versions of modules the device already runs (delivered ones in the

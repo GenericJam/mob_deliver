@@ -258,24 +258,29 @@ that started on the update screen. That needs the app to boot through
   happens.
 * **Fixing a rolled-back release: change the broken module.** When an
   update X is rolled back, the device records the module versions X
-  introduced (the modules whose compiled `.beam` differs from the release
-  it replaced) **that the failed launch actually loaded** — typically the
-  boot-path modules, not screens nobody opened. On that app version it
-  refuses every later manifest that still contains *all* of those
-  versions, whatever its `issued_at` or update window and whatever else
-  changed. So re-running the publish on the same source, or shipping a
-  release that only changes other modules (screens the failed launch never
-  opened included), does nothing for those devices; the log names the
-  modules (`refusing … any manifest that still has all of …`). Change at
-  least one of those — normally the one that crashed — and the release is
-  installed and gets its own probation. A source change counts only if it
-  changes the compiled `.beam` (not a comment-only edit). If the failed
-  launch ran none of X's new modules (killed before loading any), only
-  that exact manifest is refused. After a store update of the app, devices
-  give previously rejected content, even the unchanged manifest, a fresh
-  probation. Devices that rejected content under mob_deliver 0.1.0 refuse
-  that exact manifest on every app version; the same modules re-published
-  get one more probation launch there.
+  brought to it (compiled `.beam`s that differ from the release it
+  replaced and that weren't already on the device) **and that the failed
+  launch actually loaded** — typically the changed boot-path modules, not
+  screens nobody opened or that the device already had. On that app
+  version it refuses every later manifest that still contains *all* of
+  those versions, whatever its `issued_at` or update window and whatever
+  else changed. So re-running the publish on the same source, or shipping
+  a release that only changes other modules, does nothing for those
+  devices; the log names the modules (`refusing … any manifest that still
+  has all of …`). Change at least one of those — normally the one that
+  crashed — and the release is installed and gets its own probation. A
+  source change counts only if it changes the compiled `.beam` (not a
+  comment-only edit). If the failed launch ran nothing X brought (killed
+  before loading any), only that exact manifest is refused. After a store
+  update of the app, devices give previously rejected content, even the
+  unchanged manifest, a fresh probation. Devices that rejected content
+  under mob_deliver 0.1.0 refuse that exact manifest on every app version;
+  the same modules re-published get one more probation launch there.
+* **Moving only the update window:** a manifest with exactly the modules
+  the device already runs (and has proven) is adopted at once, with no
+  probation launch, so publishing just to set or lift
+  `--min-app-version`/`--force-update-after` doesn't hold up the next
+  update.
 
 ## 7. Troubleshooting
 

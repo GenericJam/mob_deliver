@@ -6,13 +6,15 @@ defmodule MobDeliver.Watchdog do
   State lives in `<store root>/watchdog` and changes only by durable write
   — the in-memory copy is updated after the write succeeds, never ahead.
 
-    1. **Install** (`install/4`) is one serialized transaction: refuse a
+    1. **Install** (`install/5`) is one serialized transaction: refuse a
        manifest that is rejected or already active, **defer** while any
        install is still unproven (`armed` set — the active manifest hasn't
-       passed a probation boot yet), otherwise arm `armed: X, boots: 0`
-       and activate X against the caller's compare-and-set token. A failed
-       activation disarms again; a crash in between leaves a beacon for a
-       non-active manifest, discarded by the next boot.
+       passed a probation boot yet), adopt without arming a manifest whose
+       modules are exactly the (proven) active manifest's, otherwise arm
+       `armed: X, boots: 0` and activate X against the caller's
+       compare-and-set token. A failed activation disarms again; a crash in
+       between leaves a beacon for a non-active manifest, discarded by the
+       next boot.
     2. **Boot** with X active and armed: `boots: 0 → 1`. If that can't be
        written, the boot runs bundled code — delivered code never runs
        without a durable probation record.
@@ -64,7 +66,17 @@ defmodule MobDeliver.Watchdog do
 
   # `loaded`: delivered modules the booted probation launch loaded, or nil
   # when that isn't known (outside probation, or state from older builds).
-  @empty %{armed: nil, boots: 0, rejected: [], rejections: [], loaded: nil, notice: nil}
+  # `preexisting`: module versions of the armed install whose blobs were on
+  # the device before it (fetched for an earlier manifest or session).
+  @empty %{
+    armed: nil,
+    boots: 0,
+    rejected: [],
+    rejections: [],
+    loaded: nil,
+    preexisting: %{},
+    notice: nil
+  }
 
   @typedoc """
   A rolled-back manifest on one app version: the pairs it introduced
@@ -90,12 +102,24 @@ defmodule MobDeliver.Watchdog do
   @doc """
   Installs a verified manifest: arm + activate as one step. `expected` is
   the `Store.active_id/1` the caller prepared the install against (e.g.
-  prefetched blobs for).
+  prefetched blobs for). `preexisting` are the manifest's new module
+  versions whose blobs were already on the device before this install
+  (checked before prefetching): if the update is rolled back, they aren't
+  suspects.
+
+  A manifest with exactly the active manifest's modules, while that one is
+  proven, is adopted as the active manifest without probation: nothing
+  new runs (e.g. a re-publish that only moves the update window).
   """
-  @spec install(server(), binary(), Manifest.t(), Store.manifest_id() | nil) ::
-          {:ok, :installed | :current | :rejected | :deferred} | {:error, term()}
-  def install(server, body, %Manifest{} = manifest, expected),
-    do: GenServer.call(server, {:install, body, manifest, expected})
+  @spec install(
+          server(),
+          binary(),
+          Manifest.t(),
+          Store.manifest_id() | nil,
+          %{String.t() => Manifest.sha256()}
+        ) :: {:ok, :installed | :current | :rejected | :deferred} | {:error, term()}
+  def install(server, body, %Manifest{} = manifest, expected, preexisting \\ %{}),
+    do: GenServer.call(server, {:install, body, manifest, expected, preexisting})
 
   @doc "Whether an install could proceed now (nothing unproven is pending)."
   @spec ready_to_install?(server()) :: boolean()
@@ -195,14 +219,15 @@ defmodule MobDeliver.Watchdog do
     end
   end
 
-  def handle_call({:install, body, manifest, expected}, _from, s) do
+  def handle_call({:install, body, manifest, expected, preexisting}, _from, s) do
     id = Store.manifest_id(body)
 
     cond do
       refused?(s, id, manifest) -> {:reply, {:ok, :rejected}, s}
       id == Store.active_id(s.store) -> {:reply, {:ok, :current}, s}
       s.state.armed != nil -> {:reply, {:ok, :deferred}, s}
-      true -> transact_install(s, id, body, manifest, expected)
+      same_code_as_active?(s, manifest) -> adopt(s, id, body, manifest, expected)
+      true -> transact_install(s, id, body, manifest, expected, preexisting)
     end
   end
 
@@ -356,8 +381,8 @@ defmodule MobDeliver.Watchdog do
     for {key, sha} <- modules, Map.get(before, key) != sha, into: %{}, do: {key, sha}
   end
 
-  defp transact_install(s, id, body, manifest, expected) do
-    with {:ok, armed} <- write(s, %{s.state | armed: id, boots: 0}) do
+  defp transact_install(s, id, body, manifest, expected, preexisting) do
+    with {:ok, armed} <- write(s, %{s.state | armed: id, boots: 0, preexisting: preexisting}) do
       case Store.activate(s.store, body, manifest, expected) do
         :ok ->
           {:reply, {:ok, :installed}, armed}
@@ -365,11 +390,36 @@ defmodule MobDeliver.Watchdog do
         {:error, _} = error ->
           # Best effort: a leftover beacon names a non-active manifest and is
           # discarded at the next boot.
-          {_, s} = write(armed, %{armed.state | armed: nil, boots: 0})
+          {_, s} = write(armed, %{armed.state | armed: nil, boots: 0, preexisting: %{}})
           {:reply, error, s}
       end
     else
       {{:error, _} = error, s} -> {:reply, error, s}
+    end
+  end
+
+  # The active manifest is proven (nothing armed) and this one runs exactly
+  # its code: no probation needed.
+  defp same_code_as_active?(s, %Manifest{modules: modules}) do
+    case Store.active(s.store) do
+      {_id, %Manifest{modules: ^modules}} -> true
+      _ -> false
+    end
+  end
+
+  # The previous slot becomes the replaced manifest — same code, proven — so
+  # a later update still rolls back onto proven code.
+  defp adopt(s, id, body, manifest, expected) do
+    case Store.activate(s.store, body, manifest, expected) do
+      :ok ->
+        Logger.info(
+          "mob_deliver: manifest #{id} has the active manifest's modules; adopted without probation"
+        )
+
+        {:reply, {:ok, :installed}, s}
+
+      {:error, _} = error ->
+        {:reply, error, s}
     end
   end
 
@@ -380,7 +430,14 @@ defmodule MobDeliver.Watchdog do
       {id, manifest} = Store.active(s.store)
       kept = Enum.reject(s.state.rejections, &refuses?(&1, id, manifest))
 
-      case write(s, %{s.state | armed: nil, boots: 0, loaded: nil, rejections: kept}) do
+      case write(s, %{
+             s.state
+             | armed: nil,
+               boots: 0,
+               loaded: nil,
+               preexisting: %{},
+               rejections: kept
+           }) do
         {:ok, s} ->
           Logger.info("mob_deliver: manifest #{s.booted} reached first idle; disarmed")
           {:ok, s}
@@ -405,13 +462,15 @@ defmodule MobDeliver.Watchdog do
       active != nil and budget > 0 and state.armed == active and state.boots >= 1 ->
         Logger.warning("mob_deliver: manifest #{active} never reached first idle; rolling back")
 
-        # What it replaced is the rollback target (or bundled code); of
-        # what it introduced, only what this launch loaded can have broken
-        # it (all of it if the loads weren't recorded).
+        # What it replaced is the rollback target (or bundled code). Of
+        # what it introduced, only what this update brought to the device
+        # and this launch loaded can have broken it (everything introduced
+        # if the loads weren't recorded).
         introduced = suspects(manifest, Store.previous(s.store, verify))
+        brought = Map.reject(introduced, fn {key, sha} -> state.preexisting[key] == sha end)
 
         rejection = %{
-          suspects: ran(introduced, state.loaded),
+          suspects: ran(brought, state.loaded),
           app_version: s.app_version,
           id: active
         }
@@ -423,6 +482,7 @@ defmodule MobDeliver.Watchdog do
           | armed: nil,
             boots: 0,
             loaded: nil,
+            preexisting: %{},
             rejections: [rejection | state.rejections],
             notice: %{rolled_back: active, at: DateTime.utc_now()}
         }
@@ -443,11 +503,11 @@ defmodule MobDeliver.Watchdog do
             "booting it on probation on #{inspect(s.app_version)}"
         )
 
-        probation_boot(s, active, 1)
+        probation_boot(%{s | state: %{state | preexisting: %{}}}, active, 1)
 
       state.armed != nil ->
         # Stale beacon (activation never happened); clearing is best effort.
-        {_, s} = write(s, %{state | armed: nil, boots: 0})
+        {_, s} = write(s, %{state | armed: nil, boots: 0, preexisting: %{}})
         {{:ok, :clean}, s}
 
       true ->
@@ -520,6 +580,8 @@ defmodule MobDeliver.Watchdog do
                legacy_code_rejections(Map.get(state, :rejected_code, [])),
            # Absent (unknown) in state written before loads were tracked.
            loaded: loaded(Map.get(state, :loaded)),
+           # Absent in older state: nothing is known to have been there.
+           preexisting: loaded(Map.get(state, :preexisting)) || %{},
            notice: notice
          }}
 

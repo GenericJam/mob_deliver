@@ -424,6 +424,71 @@ defmodule MobDeliver.WatchdogTest do
       assert try_install(ctx, app, [{"MyApp.A", "a2"}, {"MyApp.B", "b3"}]) == {:ok, :installed}
     end
 
+    test "module versions already on the device before the install aren't suspects, even if the failed launch loaded them",
+         ctx do
+      stable_install(ctx, [{"MyApp.Home", "home"}, {"MyApp.Greeting", "greeting 1"}])
+      app = launch(ctx)
+
+      update = [
+        {"MyApp.Home", "home"},
+        {"MyApp.Greeting", "broken"},
+        {"MyApp.LateScreen", "late 1"}
+      ]
+
+      # LateScreen's blob was fetched (and run) before this install.
+      b = body(ctx, update)
+      {:ok, manifest} = ctx.verify.(b)
+      preexisting = %{"MyApp.LateScreen" => sha("late 1")}
+
+      assert Watchdog.install(app.watchdog, b, manifest, Store.active_id(app.store), preexisting) ==
+               {:ok, :installed}
+
+      # The probation launch loads all three, and dies.
+      launch(ctx)
+      rolled = launch(ctx)
+      assert rolled.outcome == {:ok, :rolled_back}
+
+      assert try_install(ctx, rolled, [
+               {"MyApp.Home", "home"},
+               {"MyApp.Greeting", "broken"},
+               {"MyApp.LateScreen", "late 2"}
+             ]) == {:ok, :rejected}
+    end
+
+    test "re-publishing the active module map is adopted as proven at once, with no probation",
+         ctx do
+      good = stable_install(ctx, "good")
+      app = launch(ctx)
+      window = %{"issued_at" => "2026-09-30T00:00:00Z", "min_app_version" => "1.0"}
+
+      assert try_install(ctx, app, "good", window) == {:ok, :installed}
+      adopted = Store.manifest_id(body(ctx, "good", window))
+      assert Store.active_id(app.store) == adopted
+      # Not on probation: the next install isn't deferred...
+      assert Watchdog.ready_to_install?(app.watchdog)
+      next = launch(ctx)
+      assert next.outcome == {:ok, :clean}
+      assert Store.active_id(next.store) == adopted
+
+      # ...and a failed later update rolls back onto the adopted manifest.
+      install(ctx, next, "bad")
+      launch(ctx)
+      rolled = launch(ctx)
+      assert rolled.outcome == {:ok, :rolled_back}
+      assert Store.active_id(rolled.store) == adopted
+      assert good != adopted
+    end
+
+    test "re-publishing the module map of an update still on probation waits like any install",
+         ctx do
+      stable_install(ctx, "good")
+      app = launch(ctx)
+      install(ctx, app, "update")
+
+      assert try_install(ctx, app, "update", %{"issued_at" => "2026-09-30T00:00:00Z"}) ==
+               {:ok, :deferred}
+    end
+
     test "a failed launch that loaded none of the update's new modules refuses only that manifest",
          ctx do
       good = stable_install(ctx, [{"MyApp.A", "a1"}])
@@ -454,21 +519,6 @@ defmodule MobDeliver.WatchdogTest do
 
       # Either changed module alone might be the broken one: not refused.
       assert try_install(ctx, app, [{"MyApp.A", "a2"}, {"MyApp.B", "b3"}]) == {:ok, :installed}
-    end
-
-    test "a rolled-back update with the same modules as the proven one doesn't take the proven one down",
-         ctx do
-      good = stable_install(ctx, "good")
-      same_code = %{"issued_at" => "2026-09-29T00:00:00Z"}
-      install(ctx, launch(ctx), "good", same_code)
-      launch(ctx)
-      rolled = launch(ctx)
-
-      assert rolled.outcome == {:ok, :rolled_back}
-      assert Store.active_id(rolled.store) == good
-      assert launch(ctx).outcome == {:ok, :clean}
-      # The exact manifest isn't reinstalled.
-      assert try_install(ctx, rolled, "good", same_code) == {:ok, :rejected}
     end
 
     test "rejections recorded before code ids refuse the exact manifest; its modules re-published get one more probation",

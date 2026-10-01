@@ -19,22 +19,26 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
   `on_start`. Without them the plugin failed its boot and
   `root_screen/2` crashed the app's `on_start`. On older mob the plugin now
   logs why and the app runs its bundled code.
-- A rolled-back update poisons **the new modules that ran**, not its
-  signed payload: the device records, for its native app version, the
+- A rolled-back update poisons **the new code it brought that ran**, not
+  its signed payload: the device records, for its native app version, the
   module → SHA pairs the update introduced relative to the release it
-  replaced *and the failed launch loaded* (recorded durably before each
-  load), and refuses (`{:ok, :rejected}`) any later manifest that still
-  ships all of them, whatever its `issued_at`, update window or other
-  changes. So re-publishing the same source, or a release that changes
-  only other screens (including new screens the failed launch never
-  opened), no longer crashes devices again; changing the broken module
-  gets through. A launch that died before running any new module refuses
-  only that manifest. After a store update of the app the same content,
-  even the unchanged manifest, gets a fresh probation, and a manifest
-  whose rollback didn't finish before the store update boots on probation.
-  Rejections recorded by 0.1.0 keep refusing their exact manifest on every
-  version; the same modules re-published get one more probation launch
-  there.
+  replaced, *not already on the device before the install*, *and loaded by
+  the failed launch* (recorded durably before each load), and refuses
+  (`{:ok, :rejected}`) any later manifest that still ships all of them,
+  whatever its `issued_at`, update window or other changes. So
+  re-publishing the same source, or a release that changes only other
+  screens (new screens the failed launch never opened, or ones the device
+  fetched in earlier sessions), no longer crashes devices again; changing
+  the broken module gets through. A launch that died before running
+  anything the update brought refuses only that manifest. After a store
+  update of the app the same content, even the unchanged manifest, gets a
+  fresh probation, and a manifest whose rollback didn't finish before the
+  store update boots on probation. Rejections recorded by 0.1.0 keep
+  refusing their exact manifest on every version; the same modules
+  re-published get one more probation launch there.
+- A manifest with exactly the active (proven) manifest's modules, e.g. a
+  re-publish that only sets or lifts the update window, is adopted at once
+  without a probation launch, so it no longer defers the next update.
 - A frame of the forced-update screen no longer proves the booted update
   (none of its screens ran), whether the launch booted into it or was reset
   to it before the app's first frame: proof is the first committed frame of
