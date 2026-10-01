@@ -6,7 +6,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ---
 
-## [Unreleased]
+## [0.2.0] - 2026-09-30
 
 ### Removed
 - The fallbacks for mob without router hooks: the `:stable_after` timer
