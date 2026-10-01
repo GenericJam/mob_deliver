@@ -6,7 +6,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ---
 
-## [Unreleased]
+## [0.2.1] - 2026-10-01
 
 ### Changed
 - Release tarballs are re-signed with plugin-signature **envelope v2 with
