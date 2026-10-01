@@ -67,7 +67,7 @@ defmodule MobDeliver.MixProject do
       mob_dep(),
       # Plugin manifest validator lives here. Dev/test only — the host app
       # supplies mob_dev at build time.
-      {:mob_dev, "~> 0.6", only: [:dev, :test], runtime: false},
+      {:mob_dev, "~> 0.7.3", only: [:dev, :test], runtime: false},
       # HTTP for the manifest/beam fetches. Runtime dep; ranges cover the
       # Req versions sibling apps already ship on-device.
       {:req, "~> 0.5 or ~> 0.6 or ~> 0.7"},
