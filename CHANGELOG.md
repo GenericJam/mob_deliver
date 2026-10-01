@@ -6,6 +6,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ---
 
+## [Unreleased]
+
+### Changed
+- Release tarballs are re-signed with plugin-signature **envelope v2 with
+  full coverage** (MOB-301 / MOB-287 / MOB-297): CI now signs with mob_dev
+  0.7.5 (dev/test requirement widened to `~> 0.7.3`; mob locked at 0.9.7).
+  mob_dev 0.7.0/0.7.1 hosts can't read v2 envelopes; mob_dev ≥ 0.7.2
+  verifies them.
+
+---
+
 ## [0.2.0] - 2026-09-30
 
 ### Removed
