@@ -6,7 +6,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ---
 
-## [Unreleased]
+## [0.3.1] - 2026-10-02
 
 ### Fixed
 - Opening a screen from the server's newest manifest (JIT) no longer loads
