@@ -8,6 +8,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-10-02
+
 ### Fixed
 - A new app build no longer runs older delivered code over its newer
   bundled modules (MOB-361). Each install records the bundled versions
