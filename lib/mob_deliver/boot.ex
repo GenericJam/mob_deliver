@@ -81,13 +81,13 @@ defmodule MobDeliver.Boot do
     # retired, not rolled back (no rejection, no notice); and after, in
     # case a rollback lands on an outgrown previous one.
     index = Bundled.index()
-    retire_if_stale(store, watchdog, index)
+    retire_if_stale(store, watchdog, verify, index)
 
     case Watchdog.on_boot(watchdog, verify) do
       {:ok, outcome} ->
         if outcome == :rolled_back do
           log_rollback(store)
-          retire_if_stale(store, watchdog, index)
+          retire_if_stale(store, watchdog, verify, index)
         end
 
         load_active(store, watchdog, Keyword.get(opts, :load_timeout, @load_timeout))
@@ -116,11 +116,12 @@ defmodule MobDeliver.Boot do
 
   # The bundled code changed under the active manifest (a new native build
   # or a BEAM push): its delivered versions would override newer code, so
-  # the app runs its bundled code and the manifest's outgrown versions are
-  # remembered, so re-fetching it doesn't reinstall it. Not a failure: no
-  # rejection, no rollback notice. If that can't be recorded durably, this
-  # session still runs bundled code and the next boot tries again.
-  defp retire_if_stale(store, watchdog, index) do
+  # the app runs its bundled code. Retiring clears both slots, so the
+  # versions the build outgrew are remembered for both — re-fetching
+  # either manifest mustn't reinstall it. Not a failure: no rejection, no
+  # rollback notice. If that can't be recorded durably, this session still
+  # runs bundled code and the next boot tries again.
+  defp retire_if_stale(store, watchdog, verify, index) do
     with {id, manifest} <- Store.active(store) do
       case Build.check(store, id, manifest, index) do
         :ok ->
@@ -133,14 +134,17 @@ defmodule MobDeliver.Boot do
             )
           end
 
-        {:stale, pairs} ->
+        {:stale, pairs, keys} ->
           Logger.warning(
             "mob_deliver: this build's bundled code is newer than manifest #{id}'s " <>
-              "#{Enum.map_join(pairs, ", ", fn {key, _} -> key end)}; running the bundled code " <>
+              "#{Enum.join(keys, ", ")}; running the bundled code " <>
               "(publish again from this build's source to deliver updates)"
           )
 
-          with :ok <- Watchdog.supersede(watchdog, pairs),
+          # A list, not a merged map: both slots usually deliver the same key.
+          outgrown = Enum.to_list(pairs) ++ previous_outgrown(store, verify, index)
+
+          with :ok <- Watchdog.supersede(watchdog, outgrown),
                :ok <- Store.retire(store, id) do
             :ok
           else
@@ -153,6 +157,17 @@ defmodule MobDeliver.Boot do
               Store.unpublish(store)
           end
       end
+    end
+  end
+
+  # The previous slot's versions this build outgrew (if it still fits the
+  # build, none: it may legitimately be installed again).
+  defp previous_outgrown(store, verify, index) do
+    with {id, manifest} <- Store.previous_entry(store, verify),
+         {:stale, pairs, _keys} <- Build.check(store, id, manifest, index) do
+      Enum.to_list(pairs)
+    else
+      _ -> []
     end
   end
 

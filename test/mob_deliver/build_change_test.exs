@@ -196,6 +196,66 @@ defmodule MobDeliver.BuildChangeTest do
     assert running(ctx) == :delivered_b
   end
 
+  test "a build that ships the delivered version as its bundled code keeps the manifest current, and later publishes install",
+       ctx do
+    build(ctx, :bundled_v1)
+    first = launch(ctx)
+    a_bytes = compile(ctx, :delivered_a)
+    a = publish(ctx, a_bytes)
+    assert check(ctx, first, a, %{sha(a_bytes) => a_bytes}) == {:ok, :installed}
+    on_a = launch(ctx)
+    :ok = Watchdog.mark_stable(on_a.watchdog)
+
+    # The next native build includes exactly the delivered version.
+    File.write!(Path.join(ctx.bundled, "#{ctx.module}.beam"), a_bytes)
+    next = launch(ctx)
+
+    assert Store.active_id(next.store) == Store.manifest_id(a)
+    assert running(ctx) == :delivered_a
+
+    # A later publish that keeps it and changes another module installs.
+    other = "MobDeliverBuild#{ctx.n}.Other"
+
+    b =
+      %{
+        "modules" => %{
+          Manifest.module_key(ctx.module) => "sha256:" <> sha(a_bytes),
+          other => "sha256:" <> sha("other")
+        },
+        "issued_at" => "2026-10-02T00:00:00Z"
+      }
+      |> TestPublisher.fields()
+      |> TestPublisher.sign(ctx.private)
+      |> JSON.encode!()
+
+    assert check(ctx, next, b, %{sha(a_bytes) => a_bytes, sha("other") => "other"}) ==
+             {:ok, :installed}
+  end
+
+  test "when the build outgrows the active and the previous manifest, neither is installed again",
+       ctx do
+    build(ctx, :bundled_v1)
+    first = launch(ctx)
+    a_bytes = compile(ctx, :delivered_a)
+    a = publish(ctx, a_bytes)
+    assert check(ctx, first, a, %{sha(a_bytes) => a_bytes}) == {:ok, :installed}
+    on_a = launch(ctx)
+    :ok = Watchdog.mark_stable(on_a.watchdog)
+
+    b_bytes = compile(ctx, :delivered_b)
+    b = publish(ctx, b_bytes, %{"issued_at" => "2026-10-02T00:00:00Z"})
+    assert check(ctx, on_a, b, %{sha(b_bytes) => b_bytes}) == {:ok, :installed}
+    on_b = launch(ctx)
+    :ok = Watchdog.mark_stable(on_b.watchdog)
+
+    build(ctx, :bundled_v2)
+    new_build = launch(ctx)
+    assert running(ctx) == :bundled_v2
+
+    assert check(ctx, new_build, b, %{sha(b_bytes) => b_bytes}) == {:ok, :stale_for_build}
+    assert check(ctx, new_build, a, %{sha(a_bytes) => a_bytes}) == {:ok, :stale_for_build}
+  end
+
   test "a BEAM push of a newer bundled version takes effect at the next launch", ctx do
     build(ctx, :bundled_v1)
     first = launch(ctx)

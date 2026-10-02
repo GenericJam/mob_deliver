@@ -186,12 +186,13 @@ defmodule MobDeliver.Watchdog do
     do: GenServer.call(server, {:rejected?, id, manifest})
 
   @doc """
-  Records delivered `key => sha` pairs that this build's bundled code
+  Records delivered `{key, sha}` pairs that this build's bundled code
   superseded (durably; never pruned). Not a rejection: no notice, nothing
   counted against the content's probation.
   """
-  @spec supersede(server(), %{String.t() => Manifest.sha256()}) :: :ok | {:error, term()}
-  def supersede(server, pairs) when is_map(pairs), do: GenServer.call(server, {:supersede, pairs})
+  @spec supersede(server(), Enumerable.t({String.t(), Manifest.sha256()})) ::
+          :ok | {:error, term()}
+  def supersede(server, pairs), do: GenServer.call(server, {:supersede, Enum.to_list(pairs)})
 
   @doc "Whether `manifest` ships a delivered version a newer build superseded (`supersede/2`)."
   @spec superseded?(server(), Manifest.t()) :: boolean()
@@ -268,7 +269,7 @@ defmodule MobDeliver.Watchdog do
 
   def handle_call({:supersede, pairs}, _from, s) do
     known = MapSet.new(s.state.superseded)
-    new = Enum.reject(pairs, &MapSet.member?(known, &1))
+    new = pairs |> Enum.uniq() |> Enum.reject(&MapSet.member?(known, &1))
 
     if new == [] do
       {:reply, :ok, s}

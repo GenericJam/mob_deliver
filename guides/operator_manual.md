@@ -41,7 +41,10 @@ Needs mob 0.9.6 or later with its mob_dev. mob_dev evaluates
 `config/config.exs` (merged with `config/runtime.exs` if present) **on the
 build machine** for the build's Mix env and ships the result inside the
 app; mob loads it before any plugin starts. Values are fixed at build
-time, and code in those files runs on your machine, not the phone.
+time, and code in those files runs on your machine, not the phone. The
+trust settings (`trusted_publish_key`, `app`, `channel`, `app_version`)
+are read from that shipped config itself, so `Application.put_env/3` at
+runtime doesn't change them; set them in `config/*.exs`.
 
 ```elixir
 # mob.exs
@@ -175,7 +178,9 @@ won't install that manifest again (`check/0` → `{:ok, :stale_for_build}`),
 nor a re-publish that still ships those module versions. Nothing is
 rejected and the user sees no rollback notice. To deliver updates on top
 of the new build, publish again from the source that build was made from;
-that installs normally.
+that installs normally. If the new build ships exactly the delivered code
+(you folded an OTA fix into the store build), the manifest stays active
+and nothing is refused.
 
 ## 5. Update window
 

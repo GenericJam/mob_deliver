@@ -1,14 +1,27 @@
 defmodule MobDeliver.Config do
   @moduledoc false
-  # One place that reads `config :mob_deliver, ...`, all of it at runtime.
-  # On a device the config is the app's own `config/*.exs`, evaluated when
-  # the native build was made and shipped inside it (mob's `mob_app_config`
-  # module, loaded before any plugin starts); delivered code can't replace
-  # that module (MobDeliver.Protected). Reading at runtime means changing
-  # the config never needs a dependency recompile (MOB-357).
+  # One place that reads `config :mob_deliver, ...`, all of it at runtime,
+  # so changing the config never needs a dependency recompile (MOB-357).
+  #
+  # The settings that decide what is trusted — `trusted_publish_key`,
+  # `app`, `channel`, and `app_version` (the update gate) — are read from
+  # the build itself whenever it has its config module: mob_dev evaluates
+  # the app's `config/*.exs` at build time into `mob_app_config`, a module
+  # inside the signed native build, which delivered code can't replace
+  # (MobDeliver.Protected). Not from the application environment: anything
+  # running in the app can call `Application.put_env/3`. Without that module
+  # (host tests, dev, an app built by an older mob_dev) they come from the
+  # environment. Everything else comes from the environment: `endpoint` and
+  # `req_options` only decide where and how manifests are fetched (each is
+  # still verified against the build's key, so changing them can only make
+  # checks fail), the intervals only how often, `root` is read once when the
+  # store starts, and `store_url`/`update_screen`/`on_push` are presentation
+  # that code running in the session controls anyway.
+
+  @build_config :mob_app_config
 
   @spec trusted_publish_key() :: String.t() | nil
-  def trusted_publish_key, do: get(:trusted_publish_key)
+  def trusted_publish_key, do: trusted(:trusted_publish_key)
 
   @doc """
   Root directory of the on-device store: `<data dir>/mob_deliver` unless
@@ -42,10 +55,11 @@ defmodule MobDeliver.Config do
   def refresh_interval, do: get(:refresh_interval) || 30_000
 
   # This binary's store version, for the update gate: `config :mob_deliver,
-  # :app_version` if set, else `Mob.Device.app_version/0` (mob with the
-  # native accessor), else `nil`, which leaves the gate open.
+  # :app_version` if set (from the build, like the key), else
+  # `Mob.Device.app_version/0` (mob with the native accessor), else `nil`,
+  # which leaves the gate open.
   @spec app_version() :: String.t() | nil
-  def app_version, do: get(:app_version) || native_app_version()
+  def app_version, do: trusted(:app_version) || native_app_version()
 
   @native_version {__MODULE__, :native_app_version}
 
@@ -73,11 +87,11 @@ defmodule MobDeliver.Config do
   end
 
   @spec app() :: String.t() | nil
-  def app, do: get(:app)
+  def app, do: trusted(:app)
 
   @spec channel() :: String.t() | nil
   def channel do
-    case get(:channel) do
+    case trusted(:channel) do
       nil -> nil
       channel -> to_string(channel)
     end
@@ -98,7 +112,7 @@ defmodule MobDeliver.Config do
   @doc """
   The settings update checks can't run without, if unset. On a device
   `config :mob_deliver` only exists if the build shipped the app config
-  (mob >= 0.9.6 with its mob_dev); `trusted_publish_key` is compiled in.
+  (mob >= 0.9.6 with its mob_dev).
   """
   @spec missing() :: [atom()]
   def missing do
@@ -114,4 +128,29 @@ defmodule MobDeliver.Config do
 
   @spec get(atom()) :: term()
   def get(key), do: Application.get_env(:mob_deliver, key)
+
+  # From the build's own config when there is one (see the module comment):
+  # authoritative even when it doesn't set the key.
+  defp trusted(key) do
+    case build_config() do
+      {:ok, config} -> Keyword.get(config, key)
+      :none -> get(key)
+    end
+  end
+
+  defp build_config do
+    case :code.ensure_loaded(@build_config) do
+      {:module, _} ->
+        case List.keyfind(apply(@build_config, :config, []), :mob_deliver, 0) do
+          {:mob_deliver, config} when is_list(config) -> {:ok, config}
+          _ -> {:ok, []}
+        end
+
+      {:error, _} ->
+        :none
+    end
+  catch
+    # A config module that can't be read trusts nothing.
+    _, _ -> {:ok, []}
+  end
 end

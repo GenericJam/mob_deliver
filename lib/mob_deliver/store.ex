@@ -174,7 +174,16 @@ defmodule MobDeliver.Store do
   lands on bundled code.
   """
   @spec previous(server(), verify_fun()) :: Manifest.t() | nil
-  def previous(server, verify), do: GenServer.call(server, {:previous, verify})
+  def previous(server, verify) do
+    case previous_entry(server, verify) do
+      {_id, manifest} -> manifest
+      nil -> nil
+    end
+  end
+
+  @doc "As `previous/2`, with the manifest's id: `{id, manifest}` or `nil`."
+  @spec previous_entry(server(), verify_fun()) :: {manifest_id(), Manifest.t()} | nil
+  def previous_entry(server, verify), do: GenServer.call(server, {:previous, verify})
 
   @doc """
   Runs this session on bundled code without touching the persisted slots:
@@ -288,7 +297,7 @@ defmodule MobDeliver.Store do
   def handle_call({:previous, verify}, _from, %{slots: slots} = s) do
     reply =
       case slots.previous && check(slots.previous, verify) do
-        {:ok, {_id, manifest}} -> manifest
+        {:ok, entry} -> entry
         _ -> nil
       end
 

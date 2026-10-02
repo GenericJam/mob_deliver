@@ -47,6 +47,68 @@ defmodule MobDeliver.ConfigTest do
     assert {:ok, %Manifest{app: "com.example.app"}} = MobDeliver.fetch_manifest()
   end
 
+  describe "with the build's config module (as on a device)" do
+    setup do
+      on_exit(fn ->
+        for _ <- 1..2, do: :code.purge(:mob_app_config)
+        :code.delete(:mob_app_config)
+        :code.purge(:mob_app_config)
+      end)
+    end
+
+    # What mob_dev generates: the app's config/*.exs, evaluated at build time.
+    defp build_config(entries) do
+      {:module, :mob_app_config, binary, _} =
+        Module.create(
+          :mob_app_config,
+          quote(do: def(config, do: unquote(Macro.escape(entries)))),
+          Macro.Env.location(__ENV__)
+        )
+
+      binary
+    end
+
+    test "the trusted key, app, channel and app version come from the build and can't be changed at runtime" do
+      {key, private} = TestPublisher.keypair()
+      {attacker_key, attacker_private} = TestPublisher.keypair()
+
+      build_config(
+        mob_deliver: [
+          trusted_publish_key: key,
+          app: "com.example.app",
+          channel: :production,
+          app_version: "2.0.0"
+        ]
+      )
+
+      configure(key)
+
+      # Something running in the app tries to swap the trust root.
+      Application.put_env(:mob_deliver, :trusted_publish_key, attacker_key)
+      Application.put_env(:mob_deliver, :app, "com.attacker.app")
+      Application.put_env(:mob_deliver, :app_version, "99.0.0")
+      on_exit(fn -> Application.delete_env(:mob_deliver, :app_version) end)
+
+      assert MobDeliver.Config.app_version() == "2.0.0"
+
+      forged = TestPublisher.fields() |> TestPublisher.sign(attacker_private) |> JSON.encode!()
+      Req.Test.stub(__MODULE__, &Plug.Conn.send_resp(&1, 200, forged))
+      assert MobDeliver.fetch_manifest() == {:error, :invalid_signature}
+
+      genuine = TestPublisher.fields() |> TestPublisher.sign(private) |> JSON.encode!()
+      Req.Test.stub(__MODULE__, &Plug.Conn.send_resp(&1, 200, genuine))
+      assert {:ok, %Manifest{app: "com.example.app"}} = MobDeliver.fetch_manifest()
+    end
+
+    test "a build without a key is not configured, whatever the runtime environment says" do
+      build_config(mob_deliver: [app: "com.example.app", channel: :production])
+      {key, _} = TestPublisher.keypair()
+      configure(key)
+
+      assert :trusted_publish_key in MobDeliver.Config.missing()
+    end
+  end
+
   test "a malformed trusted key at boot leaves the stored manifests alone and says what to fix",
        %{tmp_dir: root} do
     {key, private} = TestPublisher.keypair()
