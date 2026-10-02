@@ -2,7 +2,7 @@
 
 You're in **mob_deliver**, a Mob plugin: content-addressed BEAM delivery for Mob apps. Two consumers of one primitive — proactive OTA updates (fetch a signed manifest, hot-load module-by-module) AND JIT screen delivery (router cache miss triggers on-demand fetch of one module).
 
-**Also read [`~/code/mob/AGENTS.md`](../mob/AGENTS.md)** for the system view and the cross-cutting pre-empt-failure rules. And **read the scope ADR** — [`decisions/2026-09-19-scope-and-wire-format.md`](decisions/2026-09-19-scope-and-wire-format.md) — before you touch anything wire-format-adjacent. It's the load-bearing document for what's in v1 vs future work.
+**Also read [`~/code/mob/AGENTS.md`](../mob/AGENTS.md)** for the system view and the cross-cutting pre-empt-failure rules. And **read the scope ADR** — [`decisions/2026-09-19-scope-and-wire-format.md`](decisions/2026-09-19-scope-and-wire-format.md) — before you touch anything wire-format-adjacent. It's the load-bearing document for what's in v1 vs future work; everything else defers to it. For the manifest schema, read [`~/code/mob/MOB_PLUGINS.md`](../mob/MOB_PLUGINS.md).
 
 > **Keep this file current.** When you change the wire format, add a slot-management step, or hit a gotcha that would trip the next agent, fix it here in the same commit — not in a follow-up.
 
@@ -81,7 +81,7 @@ Neither the update-poll nor the JIT-nav path exercises native code — pure BEAM
 
 ## Pre-commit + release
 
-Standard mob plugin flow (same as mob_wake / mob_notify / etc.):
+Standard mob plugin flow (same as mob, mob_wake, mob_notify, etc.); `credo --strict` includes ExSlop + jump_credo_checks:
 
 ```bash
 mix format
@@ -93,6 +93,8 @@ mix test
 Pre-push gate: `.githooks/pre-push` (format, credo, compile; plus tests when `mix.exs` changed). It's invoked from the beads pre-push shim, so set `git config core.hooksPath .beads/hooks` once per clone — **not** `.githooks`, which would silently disable the beads hooks.
 
 Public on GitHub (`GenericJam/mob_deliver`); CI in `.github/workflows/test.yml`. Published on Hex (`mob_deliver`); the package ships `guides/` and `decisions/` so README links resolve.
+
+Releases: a `mix.exs` version bump on master triggers `.github/workflows/release.yml` (tag + GitHub Release + Hex publish). See [`~/code/mob/RELEASE.md`](../mob/RELEASE.md) for the trigger model; do NOT bump versions without explicit permission.
 
 <!-- BEGIN BEADS INTEGRATION v:1 profile:minimal hash:6cd5cc61 -->
 ## Beads Issue Tracker
