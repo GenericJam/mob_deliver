@@ -440,7 +440,9 @@ defmodule MobDeliver.WatchdogTest do
       {:ok, manifest} = ctx.verify.(b)
       preexisting = %{"MyApp.LateScreen" => sha("late 1")}
 
-      assert Watchdog.install(app.watchdog, b, manifest, Store.active_id(app.store), preexisting) ==
+      assert Watchdog.install(app.watchdog, b, manifest, Store.active_id(app.store),
+               preexisting: preexisting
+             ) ==
                {:ok, :installed}
 
       # The probation launch loads all three, and dies.

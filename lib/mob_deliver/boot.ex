@@ -7,7 +7,7 @@ defmodule MobDeliver.Boot do
 
   require Logger
 
-  alias MobDeliver.{Config, Loader, Manifest, Poller, Store, Watchdog}
+  alias MobDeliver.{Build, Bundled, Config, Loader, Manifest, Poller, Store, Watchdog}
 
   @load_timeout 5_000
 
@@ -69,9 +69,18 @@ defmodule MobDeliver.Boot do
     verify = Keyword.get_lazy(opts, :verify, &verifier/0)
     {:ok, _} = Store.boot(store, verify)
 
+    # Before the watchdog's check, so a manifest the build has outgrown is
+    # retired, not rolled back (no rejection, no notice); and after, in
+    # case a rollback lands on an outgrown previous one.
+    index = Bundled.index()
+    retire_if_stale(store, watchdog, index)
+
     case Watchdog.on_boot(watchdog, verify) do
       {:ok, outcome} ->
-        if outcome == :rolled_back, do: log_rollback(store)
+        if outcome == :rolled_back do
+          log_rollback(store)
+          retire_if_stale(store, watchdog, index)
+        end
 
         load_active(store, watchdog, Keyword.get(opts, :load_timeout, @load_timeout))
 
@@ -94,6 +103,48 @@ defmodule MobDeliver.Boot do
     case Store.active_id(store) do
       nil -> Logger.warning("mob_deliver: rolled back; booting bundled code")
       id -> Logger.warning("mob_deliver: rolled back; booting the previous manifest #{id}")
+    end
+  end
+
+  # The bundled code changed under the active manifest (a new native build
+  # or a BEAM push): its delivered versions would override newer code, so
+  # the app runs its bundled code and the manifest's outgrown versions are
+  # remembered, so re-fetching it doesn't reinstall it. Not a failure: no
+  # rejection, no rollback notice. If that can't be recorded durably, this
+  # session still runs bundled code and the next boot tries again.
+  defp retire_if_stale(store, watchdog, index) do
+    with {id, manifest} <- Store.active(store) do
+      case Build.check(store, id, manifest, index) do
+        :ok ->
+          :ok
+
+        {:adopt, base} ->
+          with {:error, reason} <- Store.put_base(store, id, base) do
+            Logger.warning(
+              "mob_deliver: couldn't record the build #{id} runs on (#{inspect(reason)})"
+            )
+          end
+
+        {:stale, pairs} ->
+          Logger.warning(
+            "mob_deliver: this build's bundled code is newer than manifest #{id}'s " <>
+              "#{Enum.map_join(pairs, ", ", fn {key, _} -> key end)}; running the bundled code " <>
+              "(publish again from this build's source to deliver updates)"
+          )
+
+          with :ok <- Watchdog.supersede(watchdog, pairs),
+               :ok <- Store.retire(store, id) do
+            :ok
+          else
+            {:error, reason} ->
+              Logger.error(
+                "mob_deliver: couldn't retire manifest #{id} (#{inspect(reason)}); " <>
+                  "running bundled code this launch"
+              )
+
+              Store.unpublish(store)
+          end
+      end
     end
   end
 

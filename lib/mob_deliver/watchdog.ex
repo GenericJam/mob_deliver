@@ -68,6 +68,8 @@ defmodule MobDeliver.Watchdog do
   # when that isn't known (outside probation, or state from older builds).
   # `preexisting`: module versions of the armed install whose blobs were on
   # the device before it (fetched for an earlier manifest or session).
+  # `superseded`: delivered `key => sha` pairs a newer build's bundled code
+  # replaced (a manifest is stale for this build; see MobDeliver.Build).
   @empty %{
     armed: nil,
     boots: 0,
@@ -75,6 +77,7 @@ defmodule MobDeliver.Watchdog do
     rejections: [],
     loaded: nil,
     preexisting: %{},
+    superseded: [],
     notice: nil
   }
 
@@ -102,24 +105,25 @@ defmodule MobDeliver.Watchdog do
   @doc """
   Installs a verified manifest: arm + activate as one step. `expected` is
   the `Store.active_id/1` the caller prepared the install against (e.g.
-  prefetched blobs for). `preexisting` are the manifest's new module
-  versions whose blobs were already on the device before this install
-  (checked before prefetching): if the update is rolled back, they aren't
-  suspects.
+  prefetched blobs for). Options:
+
+    * `:preexisting` — the manifest's new module versions whose blobs were
+      already on the device before this install (checked before
+      prefetching): if the update is rolled back, they aren't suspects.
+    * `:base` — the bundled code it lands on (`MobDeliver.Build.base_of/2`),
+      kept with its slot.
 
   A manifest with exactly the active manifest's modules, while that one is
   proven, is adopted as the active manifest without probation: nothing
-  new runs (e.g. a re-publish that only moves the update window).
+  new runs (e.g. a re-publish that only moves the update window). One
+  that ships a delivered version a newer build superseded is
+  `{:ok, :stale_for_build}`.
   """
-  @spec install(
-          server(),
-          binary(),
-          Manifest.t(),
-          Store.manifest_id() | nil,
-          %{String.t() => Manifest.sha256()}
-        ) :: {:ok, :installed | :current | :rejected | :deferred} | {:error, term()}
-  def install(server, body, %Manifest{} = manifest, expected, preexisting \\ %{}),
-    do: GenServer.call(server, {:install, body, manifest, expected, preexisting})
+  @spec install(server(), binary(), Manifest.t(), Store.manifest_id() | nil, keyword()) ::
+          {:ok, :installed | :current | :rejected | :deferred | :stale_for_build}
+          | {:error, term()}
+  def install(server, body, %Manifest{} = manifest, expected, opts \\ []),
+    do: GenServer.call(server, {:install, body, manifest, expected, opts})
 
   @doc "Whether an install could proceed now (nothing unproven is pending)."
   @spec ready_to_install?(server()) :: boolean()
@@ -181,6 +185,19 @@ defmodule MobDeliver.Watchdog do
   def rejected?(server, id, %Manifest{} = manifest),
     do: GenServer.call(server, {:rejected?, id, manifest})
 
+  @doc """
+  Records delivered `key => sha` pairs that this build's bundled code
+  superseded (durably; never pruned). Not a rejection: no notice, nothing
+  counted against the content's probation.
+  """
+  @spec supersede(server(), %{String.t() => Manifest.sha256()}) :: :ok | {:error, term()}
+  def supersede(server, pairs) when is_map(pairs), do: GenServer.call(server, {:supersede, pairs})
+
+  @doc "Whether `manifest` ships a delivered version a newer build superseded (`supersede/2`)."
+  @spec superseded?(server(), Manifest.t()) :: boolean()
+  def superseded?(server, %Manifest{} = manifest),
+    do: GenServer.call(server, {:superseded?, manifest})
+
   @doc "The rollback notice, once: returns it and clears it."
   @spec take_notice(server()) :: notice() | nil
   def take_notice(server), do: GenServer.call(server, :take_notice)
@@ -219,17 +236,47 @@ defmodule MobDeliver.Watchdog do
     end
   end
 
-  def handle_call({:install, body, manifest, expected, preexisting}, _from, s) do
+  def handle_call({:install, body, manifest, expected, opts}, _from, s) do
     id = Store.manifest_id(body)
+    base = Keyword.get(opts, :base)
 
     cond do
-      refused?(s, id, manifest) -> {:reply, {:ok, :rejected}, s}
-      id == Store.active_id(s.store) -> {:reply, {:ok, :current}, s}
-      s.state.armed != nil -> {:reply, {:ok, :deferred}, s}
-      same_code_as_active?(s, manifest) -> adopt(s, id, body, manifest, expected)
-      true -> transact_install(s, id, body, manifest, expected, preexisting)
+      refused?(s, id, manifest) ->
+        {:reply, {:ok, :rejected}, s}
+
+      id == Store.active_id(s.store) ->
+        {:reply, {:ok, :current}, s}
+
+      stale?(s, manifest) ->
+        {:reply, {:ok, :stale_for_build}, s}
+
+      s.state.armed != nil ->
+        {:reply, {:ok, :deferred}, s}
+
+      same_code_as_active?(s, manifest) ->
+        adopt(s, id, body, manifest, expected, base)
+
+      true ->
+        preexisting = Keyword.get(opts, :preexisting, %{})
+        transact_install(s, id, body, manifest, expected, preexisting, base)
     end
   end
+
+  def handle_call({:supersede, pairs}, _from, s) do
+    known = MapSet.new(s.state.superseded)
+    new = Enum.reject(pairs, &MapSet.member?(known, &1))
+
+    if new == [] do
+      {:reply, :ok, s}
+    else
+      case write(s, %{s.state | superseded: s.state.superseded ++ new}) do
+        {:ok, s} -> {:reply, :ok, s}
+        {error, s} -> reply(error_reply(error, s))
+      end
+    end
+  end
+
+  def handle_call({:superseded?, manifest}, _from, s), do: {:reply, stale?(s, manifest), s}
 
   def handle_call(:ready?, _from, s), do: {:reply, s.state.armed == nil, s}
 
@@ -331,6 +378,7 @@ defmodule MobDeliver.Watchdog do
 
   defp unreadable_reply(:ready?, _reason), do: false
   defp unreadable_reply({:rejected?, _id, _manifest}, _reason), do: true
+  defp unreadable_reply({:superseded?, _manifest}, _reason), do: true
   defp unreadable_reply(:take_notice, _reason), do: nil
   defp unreadable_reply(_request, reason), do: {:error, {:watchdog_unreadable, reason}}
 
@@ -375,15 +423,19 @@ defmodule MobDeliver.Watchdog do
     )
   end
 
+  # Ships a delivered version that a newer build's bundled code replaced.
+  defp stale?(s, %Manifest{modules: modules}),
+    do: Enum.any?(s.state.superseded, fn {key, sha} -> Map.get(modules, key) == sha end)
+
   # The pairs `manifest` introduced relative to what it replaced.
   defp suspects(%Manifest{modules: modules}, replaced) do
     before = if replaced, do: replaced.modules, else: %{}
     for {key, sha} <- modules, Map.get(before, key) != sha, into: %{}, do: {key, sha}
   end
 
-  defp transact_install(s, id, body, manifest, expected, preexisting) do
+  defp transact_install(s, id, body, manifest, expected, preexisting, base) do
     with {:ok, armed} <- write(s, %{s.state | armed: id, boots: 0, preexisting: preexisting}) do
-      case Store.activate(s.store, body, manifest, expected) do
+      case Store.activate(s.store, body, manifest, expected, base) do
         :ok ->
           {:reply, {:ok, :installed}, armed}
 
@@ -409,8 +461,8 @@ defmodule MobDeliver.Watchdog do
 
   # The previous slot becomes the replaced manifest — same code, proven — so
   # a later update still rolls back onto proven code.
-  defp adopt(s, id, body, manifest, expected) do
-    case Store.activate(s.store, body, manifest, expected) do
+  defp adopt(s, id, body, manifest, expected, base) do
+    case Store.activate(s.store, body, manifest, expected, base) do
       :ok ->
         Logger.info(
           "mob_deliver: manifest #{id} has the active manifest's modules; adopted without probation"
@@ -582,6 +634,8 @@ defmodule MobDeliver.Watchdog do
            loaded: loaded(Map.get(state, :loaded)),
            # Absent in older state: nothing is known to have been there.
            preexisting: loaded(Map.get(state, :preexisting)) || %{},
+           # Absent in state written before builds were tracked.
+           superseded: pairs(Map.get(state, :superseded, [])),
            notice: notice
          }}
 
@@ -608,6 +662,11 @@ defmodule MobDeliver.Watchdog do
   defp loaded(_), do: nil
 
   defp strings(list), do: Enum.filter(list, &is_binary/1)
+
+  defp pairs(list) when is_list(list),
+    do: for({key, sha} = pair when is_binary(key) and is_binary(sha) <- list, do: pair)
+
+  defp pairs(_), do: []
 
   # The state file is untrusted input: malformed entries are dropped.
   defp rejections(list) when is_list(list) do

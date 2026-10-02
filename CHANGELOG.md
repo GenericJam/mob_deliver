@@ -6,6 +6,23 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ---
 
+## [Unreleased]
+
+### Fixed
+- A new app build no longer runs older delivered code over its newer
+  bundled modules (MOB-361). Each install records the bundled versions
+  (`:beam_lib.md5`) of the modules the manifest overrides; when a launch
+  finds any of them changed (a store update, `mix mob.deploy --native`, or
+  a BEAM push), the manifest is stale for that build: the app runs its
+  bundled code, the manifest's outgrown module versions are remembered,
+  and `check/0` returns the new `{:ok, :stale_for_build}` for any manifest
+  still shipping them instead of reinstalling it. Not a rollback: no
+  rejection, no notice. A publish made from the new build's source installs
+  normally. Manifests installed by 0.2.1 or earlier are retired once if
+  they override bundled modules with different code.
+
+---
+
 ## [0.2.1] - 2026-10-01
 
 ### Changed

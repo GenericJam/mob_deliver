@@ -6,7 +6,8 @@ defmodule MobDeliver.Store do
   Layout under the store root:
 
       blobs/<sha256>   .beam bytes, named by their SHA-256
-      state            the active and previous signed manifest bodies
+      state            the active and previous signed manifest bodies, and
+                       the bundled-code base each was installed on
 
   Files are written durably (tmp → fsync →
   rename → fsync dir), so a path holds its old or its complete new bytes
@@ -19,6 +20,12 @@ defmodule MobDeliver.Store do
   without re-verification. At boot the active body is re-verified
   (signature, app, channel); if it fails, the previous body is tried, and
   otherwise the store runs the app's bundled code.
+
+  Each slot also keeps its **base**: `key => md5` of the bundled
+  (app binary) versions of the modules the manifest delivers, as they were
+  when it was installed (`MobDeliver.Bundled`). If the binary's bundled
+  code changes under a manifest (a new native build or a BEAM push), the
+  manifest is stale for this build; see `retire/2`.
 
   This process holds the slots it has published; compare-and-set for
   `activate/4` and `rollback/3` is against that, so what callers see via
@@ -38,8 +45,10 @@ defmodule MobDeliver.Store do
   @typedoc "SHA-256 (lowercase hex) of a signed manifest body."
   @type manifest_id :: String.t()
   @type verify_fun :: (binary() -> {:ok, Manifest.t()} | {:error, term()})
+  @typedoc "Bundled module fingerprints a manifest was installed on: `key => md5 hex`."
+  @type base :: %{String.t() => String.t()}
 
-  @empty_slots %{active: nil, previous: nil}
+  @empty_slots %{active: nil, previous: nil, bases: %{}}
 
   @doc "Starts a store. Options: `:name` (default `#{inspect(__MODULE__)}`), `:root` (default `<MOB_DATA_DIR>/mob_deliver`)."
   @spec start_link(keyword()) :: GenServer.on_start()
@@ -123,12 +132,31 @@ defmodule MobDeliver.Store do
   Makes `body` (already verified into `manifest`) the active manifest; the
   current one becomes previous. If the active manifest is no longer
   `expected_active` (another install or rollback happened), returns
-  `{:error, :conflict}` and changes nothing.
+  `{:error, :conflict}` and changes nothing. `base` is the bundled code it
+  lands on (`nil`: unknown).
   """
-  @spec activate(server(), binary(), Manifest.t(), manifest_id() | nil) ::
+  @spec activate(server(), binary(), Manifest.t(), manifest_id() | nil, base() | nil) ::
           :ok | {:error, :conflict | term()}
-  def activate(server, body, %Manifest{} = manifest, expected_active),
-    do: GenServer.call(server, {:activate, body, manifest, expected_active})
+  def activate(server, body, %Manifest{} = manifest, expected_active, base \\ nil),
+    do: GenServer.call(server, {:activate, body, manifest, expected_active, base})
+
+  @doc "The bundled-code base manifest `id` was installed on, if it's in a slot and known."
+  @spec base(server(), manifest_id()) :: base() | nil
+  def base(server, id), do: GenServer.call(server, {:base, id})
+
+  @doc "Records the base of the manifest in a slot (for one installed before bases existed)."
+  @spec put_base(server(), manifest_id(), base()) :: :ok | {:error, term()}
+  def put_base(server, id, base), do: GenServer.call(server, {:put_base, id, base})
+
+  @doc """
+  Retires the active manifest `expected_active`: it's stale for this build
+  (the bundled code it was installed on has changed). Both slots are
+  cleared — the previous manifest is older still — and the app runs its
+  bundled code; the next boot's blob GC removes their blobs.
+  `{:error, :conflict}` if something else is active.
+  """
+  @spec retire(server(), manifest_id()) :: :ok | {:error, :conflict | term()}
+  def retire(server, expected_active), do: GenServer.call(server, {:retire, expected_active})
 
   @doc """
   Drops the active manifest `expected_active` and reinstates the previous
@@ -197,7 +225,11 @@ defmodule MobDeliver.Store do
     {:reply, {:ok, publish(table, published)}, %{s | slots: slots}}
   end
 
-  def handle_call({:activate, body, manifest, expected}, _from, %{table: table, slots: slots} = s) do
+  def handle_call(
+        {:activate, body, manifest, expected, base},
+        _from,
+        %{table: table, slots: slots} = s
+      ) do
     id = manifest_id(body)
 
     cond do
@@ -208,7 +240,8 @@ defmodule MobDeliver.Store do
         {:reply, :ok, s}
 
       true ->
-        new_slots = %{active: body, previous: slots.active}
+        bases = if base, do: Map.put(slots.bases, id, base), else: slots.bases
+        new_slots = slots(body, slots.active, bases)
 
         case persist(table, new_slots) do
           :ok ->
@@ -218,6 +251,37 @@ defmodule MobDeliver.Store do
           {:error, _} = error ->
             {:reply, error, s}
         end
+    end
+  end
+
+  def handle_call({:base, id}, _from, %{slots: slots} = s),
+    do: {:reply, Map.get(slots.bases, id), s}
+
+  def handle_call({:put_base, id, base}, _from, %{table: table, slots: slots} = s) do
+    if id in [body_id(slots.active), body_id(slots.previous)] do
+      new_slots = %{slots | bases: Map.put(slots.bases, id, base)}
+
+      case persist(table, new_slots) do
+        :ok -> {:reply, :ok, %{s | slots: new_slots}}
+        {:error, _} = error -> {:reply, error, s}
+      end
+    else
+      {:reply, {:error, :conflict}, s}
+    end
+  end
+
+  def handle_call({:retire, expected}, _from, %{table: table, slots: slots} = s) do
+    if body_id(slots.active) == expected and expected != nil do
+      case persist(table, @empty_slots) do
+        :ok ->
+          publish(table, nil)
+          {:reply, :ok, %{s | slots: @empty_slots}}
+
+        {:error, _} = error ->
+          {:reply, error, s}
+      end
+    else
+      {:reply, {:error, :conflict}, s}
     end
   end
 
@@ -261,7 +325,7 @@ defmodule MobDeliver.Store do
     if body_id(slots.active) == expected and expected != nil do
       {published, new_slots} =
         case slots.previous && check(slots.previous, verify) do
-          {:ok, published} -> {published, %{active: slots.previous, previous: nil}}
+          {:ok, published} -> {published, slots(slots.previous, nil, slots.bases)}
           _ -> {nil, @empty_slots}
         end
 
@@ -298,7 +362,7 @@ defmodule MobDeliver.Store do
         case previous && check(previous, verify) do
           {:ok, published} ->
             Logger.warning("mob_deliver: falling back to the previous manifest")
-            {published, %{active: previous, previous: nil}}
+            {published, slots(previous, nil, slots.bases)}
 
           _ ->
             Logger.warning("mob_deliver: no usable manifest; running bundled code")
@@ -318,9 +382,10 @@ defmodule MobDeliver.Store do
 
   defp read_slots(table) do
     case Disk.read_term(state_path(table)) do
-      {:ok, %{active: active, previous: previous}}
+      {:ok, %{active: active, previous: previous} = state}
       when (is_binary(active) or is_nil(active)) and (is_binary(previous) or is_nil(previous)) ->
-        %{active: active, previous: previous}
+        # `bases` is absent in state written before bases existed.
+        slots(active, previous, bases(Map.get(state, :bases, %{})))
 
       {:error, :missing} ->
         @empty_slots
@@ -334,6 +399,21 @@ defmodule MobDeliver.Store do
         @empty_slots
     end
   end
+
+  # Bases are kept only for the manifests in a slot.
+  defp slots(active, previous, bases) do
+    ids = for body <- [active, previous], body != nil, do: manifest_id(body)
+    %{active: active, previous: previous, bases: Map.take(bases, ids)}
+  end
+
+  defp bases(bases) when is_map(bases) do
+    for {id, base} when is_binary(id) and is_map(base) <- bases,
+        Enum.all?(base, fn {key, md5} -> is_binary(key) and is_binary(md5) end),
+        into: %{},
+        do: {id, base}
+  end
+
+  defp bases(_), do: %{}
 
   defp persist(table, slots) do
     with {:error, reason} = error <-

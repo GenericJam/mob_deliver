@@ -164,6 +164,18 @@ Today the publish task compiles `mobile/` only; OTA fixes to bundled `lib/`
 modules are supported by the client but need a custom build list
 (`MobDeliverServer.build/2` accepts a list of files).
 
+**A new build outranks older delivered code.** When a device runs a build
+(a store update, `mix mob.deploy --native`, or a BEAM push with
+`mix mob.deploy`) whose bundled version of a module differs from the one
+the active manifest was installed on, that manifest is stale for the
+build: at the next launch the device runs its bundled code, logs
+`mob_deliver: this build's bundled code is newer than manifest …`, and
+won't install that manifest again (`check/0` → `{:ok, :stale_for_build}`),
+nor a re-publish that still ships those module versions. Nothing is
+rejected and the user sees no rollback notice. To deliver updates on top
+of the new build, publish again from the source that build was made from;
+that installs normally.
+
 ## 5. Update window
 
 ```bash
@@ -298,6 +310,7 @@ nothing changed:
 | `{:ok, :below_min_version}` | this binary is older than the manifest's floor |
 | `{:ok, :deferred}` | an installed update hasn't finished its probation launch yet |
 | `{:ok, :rejected}` | the manifest still ships every module version a rolled-back update introduced on this device (log: `refusing … any manifest that still has all of …`); change one of them |
+| `{:ok, :stale_for_build}` | the manifest ships module versions this device's build has newer bundled code for (section 4); publish from the build's source |
 
 A navigation that does nothing logs `mob_deliver: navigation to X refused,
 it couldn't be delivered (reason)` (the same reasons as above). A module

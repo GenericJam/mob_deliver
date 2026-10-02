@@ -100,7 +100,8 @@ defmodule MobDeliver do
   end
 
   @typedoc "What `check/0` did; see its docs."
-  @type check_outcome :: :current | :installed | :rejected | :deferred | :below_min_version
+  @type check_outcome ::
+          :current | :installed | :rejected | :deferred | :below_min_version | :stale_for_build
 
   @doc """
   Checks for an update now (the poller also runs this at boot, every
@@ -119,6 +120,9 @@ defmodule MobDeliver do
     * `{:ok, :below_min_version}` — this app version is below the
       manifest's `min_app_version`: not installed, but the update gate
       (`update_status/0`) now follows it.
+    * `{:ok, :stale_for_build}` — the manifest ships versions of modules
+      that this app build has newer bundled code for (it was published
+      before this build, or from an older checkout); not installed.
     * `{:error, :not_configured}` — `:endpoint`, `:app` or `:channel` is
       unset on this device (logged).
     * `{:error, reason}` — fetch, verification, or prefetch failed; nothing

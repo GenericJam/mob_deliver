@@ -7,6 +7,8 @@ defmodule MobDeliver.Installer do
   require Logger
 
   alias MobDeliver.{
+    Build,
+    Bundled,
     Client,
     Config,
     Fetcher,
@@ -18,7 +20,8 @@ defmodule MobDeliver.Installer do
     Watchdog
   }
 
-  @type outcome :: :current | :installed | :rejected | :deferred | :below_min_version
+  @type outcome ::
+          :current | :installed | :rejected | :deferred | :below_min_version | :stale_for_build
   @type opts :: [
           store: Store.server(),
           watchdog: GenServer.server(),
@@ -47,6 +50,7 @@ defmodule MobDeliver.Installer do
         id == expected -> {:ok, :current}
         not Gate.installable?(manifest, opts[:app_version]) -> {:ok, :below_min_version}
         Watchdog.rejected?(opts[:watchdog], id, manifest) -> {:ok, :rejected}
+        Watchdog.superseded?(opts[:watchdog], manifest) -> stale_for_build(id)
         not Watchdog.ready_to_install?(opts[:watchdog]) -> {:ok, :deferred}
         true -> install(id, body, manifest, expected, opts)
       end
@@ -70,17 +74,35 @@ defmodule MobDeliver.Installer do
   # brought by it and aren't suspects.
   defp install(id, body, manifest, expected, opts) do
     preexisting = preexisting(manifest, opts)
+    # The bundled code it lands on, so a later build that changes any of it
+    # makes this manifest stale (MobDeliver.Build).
+    base = Build.base_of(manifest, Bundled.index())
 
     with :ok <- prefetch(manifest, opts),
          {:ok, :installed} = installed <-
-           Watchdog.install(opts[:watchdog], body, manifest, expected, preexisting) do
+           Watchdog.install(opts[:watchdog], body, manifest, expected,
+             preexisting: preexisting,
+             base: base
+           ) do
       Logger.info(
         "mob_deliver: installed manifest #{id}; modules this session already runs " <>
           "switch to it at the next launch, others load from it on first use"
       )
 
       installed
+    else
+      {:ok, :stale_for_build} -> stale_for_build(id)
+      other -> other
     end
+  end
+
+  defp stale_for_build(id) do
+    Logger.warning(
+      "mob_deliver: manifest #{id} ships module versions this app build has newer bundled " <>
+        "code for; not installed (publish from the source this build was made from)"
+    )
+
+    {:ok, :stale_for_build}
   end
 
   defp preexisting(%Manifest{modules: modules}, opts) do
