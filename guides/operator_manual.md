@@ -11,7 +11,7 @@ Design details live in
 |---|---|---|
 | `mob_deliver` | on the device (plugin) | fetches the signed manifest, verifies it, fetches and loads `.beam`s, rolls back failed updates, gates outdated apps |
 | `mob_deliver_server` | your build machine / CI (`mix mob_deliver.publish`) and your server (`MobDeliverServer.Plug`) | compiles `mobile/`, signs a manifest, writes blobs; serves `POST /manifest` and `GET /beam/:sha256` |
-| signing key | CI secret | private half signs manifests; public half is compiled into the app |
+| signing key | CI secret | private half signs manifests; public half is in the app's config, shipped inside the native build |
 
 Any server that speaks the wire format works — `mob_deliver_server` is the
 reference implementation, not a requirement.
@@ -27,8 +27,9 @@ Writes the private key (mode `0600`, never overwrites) and prints
 out of version control and store its contents as a CI secret
 (`MOB_DELIVER_SIGNING_KEY`).
 
-**Rotation needs a store release.** The public key is compiled into the app
-binary, and a manifest carries one signature. To rotate: ship an app version
+**Rotation needs a store release.** The public key ships inside the app
+binary (its config is part of the native build, and delivered code can't
+replace it), and a manifest carries one signature. To rotate: ship an app version
 with the new key, then publish new manifests with the new key on a separate
 channel (or once every supported app version has the new key). Old binaries
 keep accepting only the old key — if it leaks, the remedy is a store update
@@ -48,7 +49,7 @@ config :mob, :plugins, [:mob_deliver]
 
 # config/config.exs
 config :mob_deliver,
-  trusted_publish_key: "ed25519:…",       # compile time
+  trusted_publish_key: "ed25519:…",       # ships in the native build
   app: "com.example.myapp",               # must match what you publish
   channel: :production,
   endpoint: "https://example.com/deliver",
@@ -311,6 +312,7 @@ nothing changed:
 | `{:ok, :deferred}` | an installed update hasn't finished its probation launch yet |
 | `{:ok, :rejected}` | the manifest still ships every module version a rolled-back update introduced on this device (log: `refusing … any manifest that still has all of …`); change one of them |
 | `{:ok, :stale_for_build}` | the manifest ships module versions this device's build has newer bundled code for (section 4); publish from the build's source |
+| `{:error, {:protected_modules, keys}}` | the manifest would replace mob_deliver's, mob's or the app config's own code (or Elixir/crypto); never installed — remove those modules from what you publish |
 
 A navigation that does nothing logs `mob_deliver: navigation to X refused,
 it couldn't be delivered (reason)` (the same reasons as above). A module

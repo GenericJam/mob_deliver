@@ -168,6 +168,7 @@ defmodule MobDeliver.Resolver do
   # not content this device rolled back.
   defp runnable?(id, manifest, opts) do
     Gate.installable?(manifest, opts[:app_version]) and
+      MobDeliver.Protected.in_manifest(manifest) == [] and
       not Watchdog.rejected?(opts[:watchdog], id, manifest)
   end
 

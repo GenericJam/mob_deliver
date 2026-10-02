@@ -15,6 +15,7 @@ defmodule MobDeliver.Installer do
     Gate,
     Loader,
     Manifest,
+    Protected,
     SingleFlight,
     Store,
     Watchdog
@@ -43,11 +44,13 @@ defmodule MobDeliver.Installer do
 
       id = Store.manifest_id(body)
       expected = Store.active_id(opts[:store])
+      protected = Protected.in_manifest(manifest)
 
       # Cheap pre-checks so nothing is downloaded for an install that can't
       # happen; Watchdog.install/5 re-checks the watchdog ones atomically.
       cond do
         id == expected -> {:ok, :current}
+        protected != [] -> refuse_protected(id, protected)
         not Gate.installable?(manifest, opts[:app_version]) -> {:ok, :below_min_version}
         Watchdog.rejected?(opts[:watchdog], id, manifest) -> {:ok, :rejected}
         Watchdog.superseded?(opts[:watchdog], manifest) -> stale_for_build(id)
@@ -55,6 +58,17 @@ defmodule MobDeliver.Installer do
         true -> install(id, body, manifest, expected, opts)
       end
     end
+  end
+
+  # A signed manifest that would replace the code deciding what's trusted:
+  # a publishing mistake (or a leaked key). Never installed.
+  defp refuse_protected(id, keys) do
+    Logger.error(
+      "mob_deliver: manifest #{id} would replace #{Enum.join(keys, ", ")}, which delivered " <>
+        "code may never replace (mob_deliver, mob, the app config, the runtime); not installed"
+    )
+
+    {:error, {:protected_modules, keys}}
   end
 
   defp defaults(opts) do

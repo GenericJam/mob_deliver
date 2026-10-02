@@ -96,8 +96,9 @@ config :mob, :plugins, [:mob_deliver]
 
 # config/config.exs
 config :mob_deliver,
-  # Compile time: baked into the reviewed binary. "ed25519:" <> base64 of the
-  # raw 32-byte public key. The trust root for THIS app's deliverables.
+  # The trust root for THIS app's deliverables: "ed25519:" <> base64 of the
+  # raw 32-byte public key. Ships inside the native build (like all of this
+  # config) and can't be replaced by delivered code.
   trusted_publish_key: "ed25519:<base64-of-your-app's-Ed25519-public-key>",
   app: "com.example.myapp",
   endpoint: "https://updates.myapp.com",

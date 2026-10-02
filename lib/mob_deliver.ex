@@ -80,7 +80,7 @@ defmodule MobDeliver do
 
   @doc """
   Fetches the current manifest for this app + channel and verifies its
-  signature against the compile-time `:trusted_publish_key`.
+  signature against the app's `:trusted_publish_key`.
 
       config :mob_deliver,
         trusted_publish_key: "ed25519:<base64 raw 32-byte public key>",

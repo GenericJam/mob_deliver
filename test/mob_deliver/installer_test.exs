@@ -94,17 +94,17 @@ defmodule MobDeliver.InstallerTest do
         # changed and already delivered → prefetch
         {"MyApp.Home", "home v2"},
         # bundled (on the code path) → prefetch
-        {"Enum", "enum v2"},
+        {"Plug.Conn", "conn v2"},
         # never on this device → left for resolve/1
         {new_screen, "new screen"}
       ])
 
-    blobs = Map.new(["home v2", "enum v2", "new screen"], &{sha(&1), &1})
+    blobs = Map.new(["home v2", "conn v2", "new screen"], &{sha(&1), &1})
 
     assert Installer.check(opts(ctx, update, blobs)) == {:ok, :installed}
     assert Store.active_id(ctx.store) == Store.manifest_id(update)
     assert Store.has_blob?(ctx.store, sha("home v2"))
-    assert Store.has_blob?(ctx.store, sha("enum v2"))
+    assert Store.has_blob?(ctx.store, sha("conn v2"))
     refute Store.has_blob?(ctx.store, sha("new screen"))
 
     assert Installer.check(opts(ctx, update, blobs)) == {:ok, :current}
@@ -371,6 +371,18 @@ defmodule MobDeliver.InstallerTest do
 
     update = body(ctx, [{"MyApp.Home", "home 2"}], nil, %{"issued_at" => "2026-10-01T00:00:00Z"})
     assert Installer.check(opts(ctx, update, blobs)) == {:ok, :installed}
+  end
+
+  test "a manifest that would replace mob_deliver's, mob's or the app config's own code isn't installed",
+       ctx do
+    for key <- ["MobDeliver.Config", "Mob.App", ":mob_app_config", "JSON"] do
+      update = body(ctx, [{"MyApp.Home", "home"}, {key, "replacement"}])
+      blobs = %{sha("home") => "home", sha("replacement") => "replacement"}
+
+      assert Installer.check(opts(ctx, update, blobs)) == {:error, {:protected_modules, [key]}}
+      assert Store.active_id(ctx.store) == nil
+      refute_received {:fetched, _}
+    end
   end
 
   test "keys of modules this device has never heard of don't create atoms", ctx do

@@ -950,6 +950,15 @@ defmodule MobDeliver.WatchdogTest do
       assert {:ok, _} = Task.yield(Task.async(fn -> Code.ensure_loaded(module) end), 1_000)
     end
 
+    test "boot never loads a delivered replacement for the app config (installed before that was refused)",
+         ctx do
+      [config] = compile_unloaded("defmodule :mob_app_config do def config, do: [] end")
+      activate_local(ctx, processes(ctx), [config])
+
+      assert boot(ctx) == :ok
+      assert :code.is_loaded(:mob_app_config) == false
+    end
+
     test "boot skips a module whose @on_load someone else has pending, leaving theirs alone",
          ctx do
       n = System.unique_integer([:positive])

@@ -20,6 +20,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
   rejection, no notice. A publish made from the new build's source installs
   normally. Manifests installed by 0.2.1 or earlier are retired once if
   they override bundled modules with different code.
+- Changing `config :mob_deliver` no longer aborts every `mix` run until
+  `mix deps.compile mob_deliver --force` (MOB-357). The trusted key is read
+  at runtime like the rest of the config; on a device it comes from the
+  app config shipped inside the native build (mob ≥ 0.9.6). A missing or
+  malformed key stops the plugin at boot with a message saying what to
+  fix, and leaves stored manifests alone.
+
+### Changed
+- Delivered code can never replace the code that decides what's trusted:
+  a manifest delivering `mob_app_config`, `MobDeliver.*`, `Mob.*`,
+  `:mob_nif` or a module of the Elixir, `:crypto` or `:public_key`
+  applications is refused (`{:error, {:protected_modules, keys}}`), not
+  used by JIT refreshes, and never loaded from the store.
+- `MobDeliver.Watchdog.install/5` takes options (`:preexisting`, `:base`)
+  instead of a positional map (internal API).
 
 ---
 

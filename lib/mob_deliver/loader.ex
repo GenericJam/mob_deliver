@@ -8,18 +8,30 @@ defmodule MobDeliver.Loader do
   @type error ::
           {:module_mismatch, module() | nil}
           | :old_code_in_use
+          | :protected_module
           | {:load_failed, term()}
 
-  @doc "Loads `binary` as `module`. `source` is what `:code.which/1` will report."
+  @doc """
+  Loads `binary` as `module`. `source` is what `:code.which/1` will report.
+  Never loads over mob_deliver's, mob's or the app config's own code
+  (`MobDeliver.Protected`).
+  """
   @spec load(module(), binary(), Path.t()) :: :ok | {:error, error()}
   def load(module, binary, source) do
-    with :ok <- check_identity(module, binary),
+    with :ok <- check_protected(module),
+         :ok <- check_identity(module, binary),
          :ok <- make_room(module) do
       case :code.load_binary(module, String.to_charlist(source), binary) do
         {:module, ^module} -> :ok
         {:error, reason} -> {:error, {:load_failed, reason}}
       end
     end
+  end
+
+  defp check_protected(module) do
+    if MobDeliver.Protected.key?(MobDeliver.Manifest.module_key(module)),
+      do: {:error, :protected_module},
+      else: :ok
   end
 
   @doc "Modules `binary` makes remote calls into (from its imports chunk)."

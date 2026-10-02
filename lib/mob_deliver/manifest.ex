@@ -111,6 +111,10 @@ defmodule MobDeliver.Manifest do
     end
   end
 
+  @doc "Whether `key` is a usable trusted key: `\"ed25519:\"` <> base64 of a raw 32-byte public key."
+  @spec valid_key?(term()) :: boolean()
+  def valid_key?(key), do: match?({:ok, _}, decode_key(key))
+
   @doc """
   Inverse of `module_key/1`. Creates the atom, so only call it with keys
   from a verified manifest.

@@ -1,13 +1,14 @@
 defmodule MobDeliver.Config do
   @moduledoc false
-  # One place that reads `config :mob_deliver, ...`. Everything except the
-  # trusted key is runtime config; the key is baked in at compile time so the
-  # trust root ships inside the reviewed binary.
-
-  @trusted_publish_key Application.compile_env(:mob_deliver, :trusted_publish_key)
+  # One place that reads `config :mob_deliver, ...`, all of it at runtime.
+  # On a device the config is the app's own `config/*.exs`, evaluated when
+  # the native build was made and shipped inside it (mob's `mob_app_config`
+  # module, loaded before any plugin starts); delivered code can't replace
+  # that module (MobDeliver.Protected). Reading at runtime means changing
+  # the config never needs a dependency recompile (MOB-357).
 
   @spec trusted_publish_key() :: String.t() | nil
-  def trusted_publish_key, do: @trusted_publish_key
+  def trusted_publish_key, do: get(:trusted_publish_key)
 
   @doc """
   Root directory of the on-device store: `<data dir>/mob_deliver` unless

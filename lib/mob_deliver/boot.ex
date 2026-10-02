@@ -37,10 +37,12 @@ defmodule MobDeliver.Boot do
 
   # Without its processes (the OTP application not started: mob < 0.9.6
   # doesn't start plugin applications) every call would exit, and the
-  # router hook would refuse all navigation. Without app/channel the
-  # verifier would reject — and discard — every stored manifest.
+  # router hook would refuse all navigation. Without app/channel, or with
+  # a key that can't be decoded, the verifier would reject — and discard —
+  # every stored manifest.
   defp readiness(store, opts) do
-    missing = if Keyword.has_key?(opts, :verify), do: [], else: Config.missing()
+    configured? = not Keyword.has_key?(opts, :verify)
+    missing = if configured?, do: Config.missing(), else: []
 
     cond do
       GenServer.whereis(store) == nil ->
@@ -51,6 +53,12 @@ defmodule MobDeliver.Boot do
         {:skip,
          "not configured (#{Enum.map_join(missing, ", ", &inspect/1)} unset in config :mob_deliver, " <>
            "or the app config didn't reach the device: that needs mob >= 0.9.6 and its mob_dev)"}
+
+      configured? and not Manifest.valid_key?(Config.trusted_publish_key()) ->
+        {:skip,
+         "config :mob_deliver, :trusted_publish_key isn't a valid key " <>
+           "(expected \"ed25519:\" <> base64 of the 32-byte public key, as printed by " <>
+           "mix mob_deliver.gen.key); fix it and rebuild"}
 
       true ->
         :ok
