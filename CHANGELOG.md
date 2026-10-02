@@ -37,6 +37,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
   early boot): `update_status/0` → `:ok`, `check/0`, `resolve/1`,
   `mark_stable/0` → `{:error, :not_running}`, the notice functions →
   `nil`; `open_store/0` returns `{:error, _}` instead of raising.
+- `MobDeliver.check(details: true)` → `{:ok, outcome, %{restart_required:
+  boolean}}`, and `restart_required` in `state/0` (MOB-355): true while the
+  active manifest has new versions of modules this session already runs,
+  which apply at the next launch (on mob that's every bundled module), so
+  an app can offer "Restart to update". `check/0` keeps its return shape.
 
 ### Changed
 - Delivered code can never replace the code that decides what's trusted:

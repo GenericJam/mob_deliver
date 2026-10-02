@@ -155,6 +155,15 @@ A delivered manifest overrides bundled modules, so it is only right for the app 
 * **Why per module and not the whole build or the app version.** Fingerprinting the whole bundled set (or using the native version/build number) would retire every manifest at every build, including manifests that only add JIT screens and override nothing; a store update would then strand all delivered content until a new publish. Comparing exactly the modules a manifest overrides catches every case where delivered code would replace newer bundled code and nothing else. Delivered-only modules that call changed bundled code aren't covered: their compatibility with the binary is what `min_app_version` and the update window are for.
 * **Takes effect at the next launch.** Detection runs at boot. A BEAM push already replaces the running code in the session; a native deploy restarts the app.
 
+### Updates and relaunches (MOB-355, 2026-10-01)
+
+On mob every bundled module is loaded at launch, so "modules this session already runs switch at the next launch" covers nearly the whole app: an install made by the boot-time check applies only at the following launch, and a publish made while the app was closed needs two relaunches (one to install, one to run). Found integrating muster_app.
+
+**Decision: an install applies at the next launch; we report when one is pending instead of changing when code applies.** `check(details: true)` returns `{:ok, outcome, %{restart_required: boolean}}` (`check/0` keeps its shape) and `state/0` has `restart_required`: true while the active manifest delivers a module this session runs with different code (bundled, or another manifest's version; compared by `module_info(:md5)` against the delivered blob, so a re-publish of identical code doesn't ask for a restart). Modules not loaded yet (a JIT screen not opened this session) already take the new version on first use. Two alternatives were rejected:
+
+* **Hot-swapping loaded modules at install.** It would run code mid-session that never had a probation launch, mixed with callers and state from the old version. A crash there is outside any probation record, so nothing would roll it back or refuse it; the guarantee "everything that runs a new version has been through a probation boot" (Client-side rollback) would no longer hold. Opt-in per-module hot swap stays future work ("Session affinity").
+* **Waiting for the boot check before the app starts** (a bounded wait so one relaunch suffices). Boot never touches the network: on a slow or unreachable server every launch would pay the wait, for an update that is rare. The cost of the current rule is one extra relaunch only when the publish happened while the app was closed: checks also run every `:poll_interval` in the foreground, on resume when one is due, and on a silent push, so an app in use usually installs during a session and applies at its next launch. While an install is still on probation, further checks are `:deferred` until that install's launch has proven it.
+
 ### Phoenix-native server layout
 
 The companion library (`mob_deliver_server`, separate) plugs into a Phoenix project. Developer conventions:

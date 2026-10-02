@@ -253,7 +253,14 @@ that started on the update screen. That needs the app to boot through
   on the device calls (including screens that are only navigated to) are
   fetched the first time they're navigated to.
 * **When updates apply:** at the next launch. A running session keeps its
-  loaded code; modules not loaded yet resolve to the new manifest at once.
+  loaded code, and on mob that's every bundled module (all loaded at
+  launch); only modules not loaded yet (a JIT screen not opened this
+  session) use the new manifest at once. So an update installed while the
+  app runs applies at its next launch, and one published while the app was
+  closed needs two: the launch's own check installs it, the one after runs
+  it. `MobDeliver.check(details: true)` and `MobDeliver.state/0` report
+  `restart_required` so the app can offer "Restart to update" (the ADR's
+  "Updates and relaunches" explains why code isn't swapped mid-session).
 * **Probation:** the first launch of a new manifest is on probation until the
   root screen paints (first idle). If that launch dies first, the next launch
   rolls back to the previous manifest, refuses what that update introduced

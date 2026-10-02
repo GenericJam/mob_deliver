@@ -194,7 +194,11 @@ checks pause in the background and catch up on return), and on a silent
 push whose data carries `"mob_wake_id": "mob_deliver_check"` (with
 `mob_wake` installed; best effort on Android, see the
 [operator manual](guides/operator_manual.md#6-what-devices-do)).
-`MobDeliver.check/0` runs one now.
+`MobDeliver.check/0` runs one now. An installed update applies at the
+next launch (on mob every bundled module is already loaded); modules not
+loaded yet use it at once. `MobDeliver.check(details: true)` and
+`MobDeliver.state/0` report `restart_required` so the app can offer
+"Restart to update".
 
 ## Guides
 

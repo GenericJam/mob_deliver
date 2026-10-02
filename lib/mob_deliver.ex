@@ -132,9 +132,29 @@ defmodule MobDeliver do
 
   Concurrent calls share one check. The result and its time are kept for
   `state/0`.
+
+  **When an install applies.** A running session keeps the code it has
+  loaded, and on mob that's every bundled module, loaded at launch. So a
+  new version of a module the app already runs applies at the next launch;
+  only modules not loaded yet (e.g. a JIT screen not opened this session)
+  use it right away. `check(details: true)` and `state/0` say when that's
+  the case (`restart_required`), so the app can offer "Restart to update".
   """
   @spec check() :: {:ok, check_outcome()} | {:error, term()}
-  def check do
+  def check, do: check([])
+
+  @doc """
+  `check/0` with options. `details: true` returns
+  `{:ok, outcome, %{restart_required: boolean}}` on success:
+  `restart_required` is true while the active manifest has new versions
+  of modules this session already runs, which apply at the next launch
+  (see `check/0`). Errors are as for `check/0`.
+  """
+  @spec check(keyword()) ::
+          {:ok, check_outcome()}
+          | {:ok, check_outcome(), %{restart_required: boolean()}}
+          | {:error, term()}
+  def check(opts) do
     result =
       running(fn ->
         MobDeliver.SingleFlight.run(
@@ -145,7 +165,11 @@ defmodule MobDeliver do
       end)
 
     if result != {:error, :not_running}, do: MobDeliver.Status.put_check(result)
-    result
+
+    case {result, Keyword.get(opts, :details, false)} do
+      {{:ok, outcome}, true} -> {:ok, outcome, %{restart_required: restart_required?()}}
+      _ -> result
+    end
   end
 
   @doc false
@@ -278,6 +302,7 @@ defmodule MobDeliver do
           active: %{id: String.t(), issued_at: DateTime.t()} | nil,
           last_check: %{result: term(), at: DateTime.t()} | nil,
           update_status: MobDeliver.Gate.status(),
+          restart_required: boolean(),
           rollback_notice: MobDeliver.Watchdog.notice() | nil
         }
 
@@ -291,6 +316,9 @@ defmodule MobDeliver do
     * `:last_check` — the last `check/0`'s result (by the poller, a push,
       or the app) and when it finished, or `nil` before the first.
     * `:update_status` — as `update_status/0`.
+    * `:restart_required` — the active manifest has new versions of
+      modules this session already runs; they apply at the next launch
+      (see `check/0`).
     * `:rollback_notice` — as `rollback_notice/0` (not consumed).
   """
   @spec state() :: state()
@@ -300,6 +328,7 @@ defmodule MobDeliver do
       active: running(&active/0, nil),
       last_check: MobDeliver.Status.last_check(),
       update_status: update_status(),
+      restart_required: restart_required?(),
       rollback_notice: rollback_notice()
     }
   end
@@ -312,6 +341,9 @@ defmodule MobDeliver do
   end
 
   defp running?, do: Process.whereis(MobDeliver.Store) != nil
+
+  defp restart_required?,
+    do: running(fn -> MobDeliver.Restart.required?(MobDeliver.Store) end, false)
 
   # Runs `fun` unless mob_deliver's processes are down (then, or if it
   # raises or exits because they went down meanwhile, `default`).
