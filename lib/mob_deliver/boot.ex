@@ -134,17 +134,24 @@ defmodule MobDeliver.Boot do
             )
           end
 
-        {:stale, pairs, keys} ->
+        {:stale, superseded, unresolved} ->
+          keys = Map.keys(superseded) ++ Map.keys(unresolved)
+
           Logger.warning(
             "mob_deliver: this build's bundled code is newer than manifest #{id}'s " <>
-              "#{Enum.join(keys, ", ")}; running the bundled code " <>
+              "#{Enum.join(Enum.sort(keys), ", ")}; running the bundled code " <>
               "(publish again from this build's source to deliver updates)"
           )
 
-          # A list, not a merged map: both slots usually deliver the same key.
-          outgrown = Enum.to_list(pairs) ++ previous_outgrown(store, verify, index)
+          # Lists, not merged maps: both slots usually deliver the same key.
+          {prev_superseded, prev_unresolved} = previous_outgrown(store, verify, index)
 
-          with :ok <- Watchdog.supersede(watchdog, outgrown),
+          with :ok <-
+                 Watchdog.supersede(
+                   watchdog,
+                   Enum.to_list(superseded) ++ prev_superseded,
+                   Enum.to_list(unresolved) ++ prev_unresolved
+                 ),
                :ok <- Store.retire(store, id) do
             :ok
           else
@@ -164,10 +171,10 @@ defmodule MobDeliver.Boot do
   # build, none: it may legitimately be installed again).
   defp previous_outgrown(store, verify, index) do
     with {id, manifest} <- Store.previous_entry(store, verify),
-         {:stale, pairs, _keys} <- Build.check(store, id, manifest, index) do
-      Enum.to_list(pairs)
+         {:stale, superseded, unresolved} <- Build.check(store, id, manifest, index) do
+      {Enum.to_list(superseded), Enum.to_list(unresolved)}
     else
-      _ -> []
+      _ -> {[], []}
     end
   end
 

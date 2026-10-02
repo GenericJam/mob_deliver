@@ -70,6 +70,9 @@ defmodule MobDeliver.Watchdog do
   # the device before it (fetched for an earlier manifest or session).
   # `superseded`: delivered `key => sha` pairs a newer build's bundled code
   # replaced (a manifest is stale for this build; see MobDeliver.Build).
+  # `unresolved`: pairs of a manifest the build outgrew whose blobs weren't
+  # on the device to compare with the bundled code: an install including
+  # one compares it first (`resolve/2` or `supersede/2`), never skips it.
   @empty %{
     armed: nil,
     boots: 0,
@@ -78,6 +81,7 @@ defmodule MobDeliver.Watchdog do
     loaded: nil,
     preexisting: %{},
     superseded: [],
+    unresolved: [],
     notice: nil
   }
 
@@ -116,8 +120,8 @@ defmodule MobDeliver.Watchdog do
   A manifest with exactly the active manifest's modules, while that one is
   proven, is adopted as the active manifest without probation: nothing
   new runs (e.g. a re-publish that only moves the update window). One
-  that ships a delivered version a newer build superseded is
-  `{:ok, :stale_for_build}`.
+  that ships a delivered version a newer build superseded, or one not yet
+  compared with the build (`unresolved/2`), is `{:ok, :stale_for_build}`.
   """
   @spec install(server(), binary(), Manifest.t(), Store.manifest_id() | nil, keyword()) ::
           {:ok, :installed | :current | :rejected | :deferred | :stale_for_build}
@@ -187,17 +191,28 @@ defmodule MobDeliver.Watchdog do
 
   @doc """
   Records delivered `{key, sha}` pairs that this build's bundled code
-  superseded (durably; never pruned). Not a rejection: no notice, nothing
-  counted against the content's probation.
+  superseded, and `unresolved` ones it may have (their blobs weren't on
+  the device to compare), durably and in one write. Superseded pairs are
+  never pruned; superseding an unresolved pair resolves it. Not a
+  rejection: no notice, nothing counted against the content's probation.
   """
-  @spec supersede(server(), Enumerable.t({String.t(), Manifest.sha256()})) ::
-          :ok | {:error, term()}
-  def supersede(server, pairs), do: GenServer.call(server, {:supersede, Enum.to_list(pairs)})
+  @spec supersede(server(), Enumerable.t(), Enumerable.t()) :: :ok | {:error, term()}
+  def supersede(server, pairs, unresolved \\ []),
+    do: GenServer.call(server, {:supersede, Enum.to_list(pairs), Enum.to_list(unresolved)})
 
   @doc "Whether `manifest` ships a delivered version a newer build superseded (`supersede/2`)."
   @spec superseded?(server(), Manifest.t()) :: boolean()
   def superseded?(server, %Manifest{} = manifest),
     do: GenServer.call(server, {:superseded?, manifest})
+
+  @doc "The unresolved pairs (`supersede/3`) `manifest` ships, to compare before installing it."
+  @spec unresolved(server(), Manifest.t()) :: [{String.t(), Manifest.sha256()}]
+  def unresolved(server, %Manifest{} = manifest),
+    do: GenServer.call(server, {:unresolved, manifest})
+
+  @doc "Clears unresolved pairs found identical to this build's bundled code."
+  @spec resolve(server(), [{String.t(), Manifest.sha256()}]) :: :ok | {:error, term()}
+  def resolve(server, pairs), do: GenServer.call(server, {:resolve, pairs})
 
   @doc "The rollback notice, once: returns it and clears it."
   @spec take_notice(server()) :: notice() | nil
@@ -252,7 +267,7 @@ defmodule MobDeliver.Watchdog do
       id == Store.active_id(s.store) ->
         {:reply, {:ok, :current}, s}
 
-      stale?(s, manifest) ->
+      stale?(s, manifest) or unresolved_in(s, manifest) != [] ->
         {:reply, {:ok, :stale_for_build}, s}
 
       s.state.armed != nil ->
@@ -267,21 +282,23 @@ defmodule MobDeliver.Watchdog do
     end
   end
 
-  def handle_call({:supersede, pairs}, _from, s) do
-    known = MapSet.new(s.state.superseded)
-    new = pairs |> Enum.uniq() |> Enum.reject(&MapSet.member?(known, &1))
+  def handle_call({:supersede, pairs, unresolved}, _from, s) do
+    superseded = Enum.uniq(s.state.superseded ++ pairs)
+    known = MapSet.new(superseded)
 
-    if new == [] do
-      {:reply, :ok, s}
-    else
-      case write(s, %{s.state | superseded: s.state.superseded ++ new}) do
-        {:ok, s} -> {:reply, :ok, s}
-        {error, s} -> reply(error_reply(error, s))
-      end
-    end
+    unresolved =
+      (s.state.unresolved ++ unresolved) |> Enum.uniq() |> Enum.reject(&MapSet.member?(known, &1))
+
+    update(s, %{s.state | superseded: superseded, unresolved: unresolved})
   end
 
+  def handle_call({:resolve, pairs}, _from, s),
+    do: update(s, %{s.state | unresolved: s.state.unresolved -- pairs})
+
   def handle_call({:superseded?, manifest}, _from, s), do: {:reply, stale?(s, manifest), s}
+
+  def handle_call({:unresolved, manifest}, _from, s),
+    do: {:reply, unresolved_in(s, manifest), s}
 
   def handle_call(:ready?, _from, s), do: {:reply, s.state.armed == nil, s}
 
@@ -386,11 +403,22 @@ defmodule MobDeliver.Watchdog do
   defp unreadable_reply(:ready?, _reason), do: false
   defp unreadable_reply({:rejected?, _id, _manifest}, _reason), do: true
   defp unreadable_reply({:superseded?, _manifest}, _reason), do: true
+  defp unreadable_reply({:unresolved, _manifest}, _reason), do: []
   defp unreadable_reply(:take_notice, _reason), do: nil
   defp unreadable_reply(:notice, _reason), do: nil
   defp unreadable_reply(_request, reason), do: {:error, {:watchdog_unreadable, reason}}
 
   defp reply({reply, s}), do: {:reply, reply, s}
+
+  # Persists `state` unless nothing changed.
+  defp update(s, state) when state == s.state, do: {:reply, :ok, s}
+
+  defp update(s, state) do
+    case write(s, state) do
+      {:ok, s} -> {:reply, :ok, s}
+      {error, s} -> reply(error_reply(error, s))
+    end
+  end
 
   defp booted_armed?(s),
     do:
@@ -434,6 +462,9 @@ defmodule MobDeliver.Watchdog do
   # Ships a delivered version that a newer build's bundled code replaced.
   defp stale?(s, %Manifest{modules: modules}),
     do: Enum.any?(s.state.superseded, fn {key, sha} -> Map.get(modules, key) == sha end)
+
+  defp unresolved_in(s, %Manifest{modules: modules}),
+    do: Enum.filter(s.state.unresolved, fn {key, sha} -> Map.get(modules, key) == sha end)
 
   # The pairs `manifest` introduced relative to what it replaced.
   defp suspects(%Manifest{modules: modules}, replaced) do
@@ -644,6 +675,7 @@ defmodule MobDeliver.Watchdog do
            preexisting: loaded(Map.get(state, :preexisting)) || %{},
            # Absent in state written before builds were tracked.
            superseded: pairs(Map.get(state, :superseded, [])),
+           unresolved: pairs(Map.get(state, :unresolved, [])),
            notice: notice
          }}
 

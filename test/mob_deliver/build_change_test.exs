@@ -256,6 +256,48 @@ defmodule MobDeliver.BuildChangeTest do
     assert check(ctx, new_build, a, %{sha(a_bytes) => a_bytes}) == {:ok, :stale_for_build}
   end
 
+  test "a manifest whose delivered blob was lost when the build outgrew it isn't reinstalled over the new build",
+       ctx do
+    build(ctx, :bundled_v1)
+    first = launch(ctx)
+    a_bytes = compile(ctx, :delivered_a)
+    a = publish(ctx, a_bytes)
+    assert check(ctx, first, a, %{sha(a_bytes) => a_bytes}) == {:ok, :installed}
+    on_a = launch(ctx)
+    :ok = Watchdog.mark_stable(on_a.watchdog)
+
+    # The blob is gone (storage corruption) when the newer build launches.
+    File.rm!(Store.blob_path(on_a.store, sha(a_bytes)))
+    build(ctx, :bundled_v2)
+    new_build = launch(ctx)
+    assert running(ctx) == :bundled_v2
+
+    # The server still serves A: fetched again, it's compared and refused.
+    assert check(ctx, new_build, a, %{sha(a_bytes) => a_bytes}) == {:ok, :stale_for_build}
+    assert Store.active(new_build.store) == nil
+    assert check(ctx, new_build, a, %{}) == {:ok, :stale_for_build}
+
+    launch(ctx)
+    assert running(ctx) == :bundled_v2
+  end
+
+  test "a manifest whose delivered blob was lost installs again if the new build ships that same code",
+       ctx do
+    build(ctx, :bundled_v1)
+    first = launch(ctx)
+    a_bytes = compile(ctx, :delivered_a)
+    a = publish(ctx, a_bytes)
+    assert check(ctx, first, a, %{sha(a_bytes) => a_bytes}) == {:ok, :installed}
+    on_a = launch(ctx)
+    :ok = Watchdog.mark_stable(on_a.watchdog)
+
+    File.rm!(Store.blob_path(on_a.store, sha(a_bytes)))
+    File.write!(Path.join(ctx.bundled, "#{ctx.module}.beam"), a_bytes)
+    new_build = launch(ctx)
+
+    assert check(ctx, new_build, a, %{sha(a_bytes) => a_bytes}) == {:ok, :installed}
+  end
+
   test "a BEAM push of a newer bundled version takes effect at the next launch", ctx do
     build(ctx, :bundled_v1)
     first = launch(ctx)

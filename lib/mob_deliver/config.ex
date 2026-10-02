@@ -10,13 +10,15 @@ defmodule MobDeliver.Config do
   # inside the signed native build, which delivered code can't replace
   # (MobDeliver.Protected). Not from the application environment: anything
   # running in the app can call `Application.put_env/3`. Without that module
-  # (host tests, dev, an app built by an older mob_dev) they come from the
-  # environment. Everything else comes from the environment: `endpoint` and
-  # `req_options` only decide where and how manifests are fetched (each is
-  # still verified against the build's key, so changing them can only make
-  # checks fail), the intervals only how often, `root` is read once when the
-  # store starts, and `store_url`/`update_screen`/`on_push` are presentation
-  # that code running in the session controls anyway.
+  # on a device (mob's NIF reports :android or :ios) nothing is trusted and
+  # the plugin reports itself not configured; only off-device (host tests,
+  # dev) do they come from the environment. Everything else comes from the
+  # environment: `endpoint` and `req_options` only decide where and how
+  # manifests are fetched (each is still verified against the build's key,
+  # so changing them can only make checks fail), the intervals only how
+  # often, `root` is read once when the store starts, and
+  # `store_url`/`update_screen`/`on_push` are presentation that code
+  # running in the session controls anyway.
 
   @build_config :mob_app_config
 
@@ -147,10 +149,17 @@ defmodule MobDeliver.Config do
         end
 
       {:error, _} ->
-        :none
+        if on_device?(), do: {:ok, []}, else: :none
     end
   catch
     # A config module that can't be read trusts nothing.
     _, _ -> {:ok, []}
+  end
+
+  # mob's NIF answers only on a phone; off-device it isn't loaded.
+  defp on_device? do
+    apply(:mob_nif, :platform, []) in [:android, :ios]
+  catch
+    _, _ -> false
   end
 end

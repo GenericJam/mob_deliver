@@ -21,19 +21,24 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
   normally, and so does a manifest whose delivered code the new build ships
   unchanged (an OTA fix folded into the store build): it stays active and
   its versions are never refused. The previous manifest is checked too, so
-  neither slot's outgrown versions can come back. Manifests installed by
-  0.2.1 or earlier are retired once if they override bundled modules with
-  different code.
+  neither slot's outgrown versions can come back, and a delivered version
+  whose blob was lost when the build outgrew it is compared with the
+  bundled code when an install brings it back (refused unless identical).
+  Manifests installed by 0.2.1 or earlier are retired once if they
+  override bundled modules with different code.
 - Changing `config :mob_deliver` no longer aborts every `mix` run until
   `mix deps.compile mob_deliver --force` (MOB-357). Config is read at
   runtime; on a device it comes from the app config shipped inside the
   native build (mob ≥ 0.9.6). The trust settings (`trusted_publish_key`,
   `app`, `channel`, `app_version`) are read from that build config module
   itself, not the application environment, so code running in the app
-  can't swap them with `Application.put_env/3`; without the module (host
-  tests, dev) they come from the environment. A missing or malformed key
-  stops the plugin at boot with a message saying what to fix, and leaves
-  stored manifests alone.
+  can't swap them with `Application.put_env/3`. On a device without that
+  module nothing is trusted (the plugin reports itself not configured);
+  off-device (host tests, dev) they come from the environment. This is
+  defence in depth, not an in-session boundary: see
+  `decisions/2026-10-02-delivered-code-threat-model.md`. A missing or
+  malformed key stops the plugin at boot with a message saying what to
+  fix, and leaves stored manifests alone.
 
 ### Added
 - `MobDeliver.state/0` (MOB-358): the active manifest's id and

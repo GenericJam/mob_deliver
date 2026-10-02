@@ -24,15 +24,17 @@ defmodule MobDeliver.Build do
       for a manifest installed by an older mob_deliver), but every one of
       them is now identical to the delivered version (a build that ships
       the delivered code): it still fits, record `base` as its base;
-    * `{:stale, pairs, keys}` — the bundled versions of `keys` changed
-      under it to code other than the delivered one: the build outgrew it.
-      `pairs` (`key => sha`) are the delivered versions known to differ
-      from the new bundled code, the ones to refuse from now on; a key
-      whose delivered blob isn't on the device to compare is in `keys` but
-      not in `pairs`.
+    * `{:stale, superseded, unresolved}` — the bundled versions of some
+      of its modules changed under it to code other than the delivered
+      one: the build outgrew it. `superseded` (`key => sha`) are the
+      delivered versions known to differ from the new bundled code, to
+      refuse from now on; `unresolved` are the ones whose delivered blob
+      isn't on the device (lost or corrupt) to compare, so it can't be
+      told whether this build ships them: an install that brings them
+      back compares them then (`matches_bundled?/3`).
   """
   @spec check(Store.server(), Store.manifest_id(), Manifest.t(), Bundled.index()) ::
-          :ok | {:adopt, Store.base()} | {:stale, pairs(), [String.t()]}
+          :ok | {:adopt, Store.base()} | {:stale, pairs(), pairs()}
   def check(store, id, %Manifest{modules: modules} = manifest, index) do
     now = base_of(manifest, index)
     base = Store.base(store, id)
@@ -42,18 +44,34 @@ defmodule MobDeliver.Build do
       for {key, md5} <- now, base == nil or Map.get(base, key) != md5, do: {key, md5}
 
     outgrown =
-      for {key, md5} <- changed, delivered_md5(store, modules[key]) != md5, do: key
+      for {key, md5} <- changed,
+          delivered = delivered_md5(store, modules[key]),
+          delivered != md5,
+          do: {key, delivered}
 
     cond do
       outgrown != [] ->
-        known = for key <- outgrown, delivered_md5(store, modules[key]) != :not_local, do: key
-        {:stale, Map.take(modules, known), outgrown}
+        {unresolved, superseded} = Enum.split_with(outgrown, &(elem(&1, 1) == :not_local))
+        keys = &Enum.map(&1, fn {key, _} -> key end)
+        {:stale, Map.take(modules, keys.(superseded)), Map.take(modules, keys.(unresolved))}
 
       changed == [] ->
         :ok
 
       true ->
         {:adopt, now}
+    end
+  end
+
+  @doc """
+  Whether delivered `binary` for `key` would override nothing newer in
+  this build: the build doesn't bundle `key`, or bundles exactly that code.
+  """
+  @spec matches_bundled?(String.t(), binary(), Bundled.index()) :: boolean()
+  def matches_bundled?(key, binary, index) do
+    case Bundled.md5s(index, [key]) do
+      %{^key => bundled} -> Bundled.md5(binary) == {:ok, bundled}
+      _not_bundled -> true
     end
   end
 

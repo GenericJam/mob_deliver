@@ -47,6 +47,33 @@ defmodule MobDeliver.ConfigTest do
     assert {:ok, %Manifest{app: "com.example.app"}} = MobDeliver.fetch_manifest()
   end
 
+  test "on a device, a build without its config module trusts no runtime key", %{tmp_dir: tmp} do
+    {key, _} = TestPublisher.keypair()
+    configure(key)
+    assert MobDeliver.Config.missing() == []
+
+    # mob's NIF as on a phone (this module isn't async, so nothing else runs).
+    # Unloading it afterwards restores the host's state: its NIF library
+    # never loads off-device, so later calls autoload it again as before.
+    on_exit(fn ->
+      :code.purge(:mob_nif)
+      :code.delete(:mob_nif)
+      :code.purge(:mob_nif)
+    end)
+
+    [{:mob_nif, fake}] =
+      Code.compile_string(
+        "defmodule :mob_nif do def platform, do: :android end",
+        Path.join(tmp, "mob_nif.ex")
+      )
+
+    :code.purge(:mob_nif)
+    {:module, :mob_nif} = :code.load_binary(:mob_nif, ~c"mob_nif.beam", fake)
+
+    assert :trusted_publish_key in MobDeliver.Config.missing()
+    assert :app in MobDeliver.Config.missing()
+  end
+
   describe "with the build's config module (as on a device)" do
     setup do
       on_exit(fn ->
