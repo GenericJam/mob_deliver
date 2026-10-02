@@ -175,7 +175,8 @@ the active manifest was installed on, that manifest is stale for the
 build: at the next launch the device runs its bundled code, logs
 `mob_deliver: this build's bundled code is newer than manifest …`, and
 won't install that manifest again (`check/0` → `{:ok, :stale_for_build}`),
-nor a re-publish that still ships those module versions. Nothing is
+nor a re-publish that still ships those module versions, nor load screens
+from it on navigation. Nothing is
 rejected and the user sees no rollback notice. To deliver updates on top
 of the new build, publish again from the source that build was made from;
 that installs normally. If the new build ships exactly the delivered code
@@ -257,11 +258,14 @@ that started on the update screen. That needs the app to boot through
   modules those call, so the next launch has them offline. Modules nothing
   on the device calls (including screens that are only navigated to) are
   fetched the first time they're navigated to.
-* **When updates apply:** at the next launch. A running session keeps its
-  loaded code, and on mob that's every bundled module (all loaded at
-  launch); only modules not loaded yet (a JIT screen not opened this
-  session) use the new manifest at once. So an update installed while the
-  app runs applies at its next launch, and one published while the app was
+* **When updates apply:** a running session keeps the code it has loaded.
+  mob loads modules on first use (the root screen and what it calls right
+  after launch), so a new version of anything already loaded applies at
+  the next launch. A screen not opened yet this session, and the delivered
+  modules it calls, take the new manifest when first navigated to; a
+  bundled module first called directly by other code runs its bundled
+  version until the next launch. So an update installed while the app runs
+  mostly applies at its next launch, and one published while the app was
   closed needs two: the launch's own check installs it, the one after runs
   it. `MobDeliver.check(details: true)` and `MobDeliver.state/0` report
   `restart_required` so the app can offer "Restart to update" (the ADR's

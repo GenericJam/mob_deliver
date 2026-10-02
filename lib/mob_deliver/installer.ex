@@ -90,11 +90,10 @@ defmodule MobDeliver.Installer do
     preexisting = preexisting(manifest, opts)
     # The bundled code it lands on, so a later build that changes any of it
     # makes this manifest stale (MobDeliver.Build).
-    index = Bundled.index()
-    base = Build.base_of(manifest, index)
+    base = Build.base_of(manifest, Bundled.index())
 
     with :ok <- prefetch(manifest, opts),
-         :ok <- resolve_unresolved(manifest, index, opts),
+         :ok <- Build.settle_unresolved(manifest, opts),
          {:ok, :installed} = installed <-
            Watchdog.install(opts[:watchdog], body, manifest, expected,
              preexisting: preexisting,
@@ -109,44 +108,6 @@ defmodule MobDeliver.Installer do
     else
       {:ok, :stale_for_build} -> stale_for_build(id)
       other -> other
-    end
-  end
-
-  # Versions of a manifest this build outgrew that couldn't be compared
-  # with the bundled code then (their blobs were lost): now that they're
-  # on the device again, compare. Identical to this build's bundled code
-  # (or no longer bundled) → nothing newer is overridden, clear them;
-  # otherwise they're stale for this build like any outgrown version.
-  defp resolve_unresolved(manifest, index, opts) do
-    case Watchdog.unresolved(opts[:watchdog], manifest) do
-      [] -> :ok
-      pending -> compare_unresolved(pending, index, opts)
-    end
-  end
-
-  defp compare_unresolved(pending, index, opts) do
-    compared =
-      Enum.reduce_while(pending, {[], []}, fn {key, sha} = pair, {same, newer} ->
-        case Fetcher.ensure_blob(sha, opts) do
-          {:ok, binary} ->
-            if Build.matches_bundled?(key, binary, index),
-              do: {:cont, {[pair | same], newer}},
-              else: {:cont, {same, [pair | newer]}}
-
-          {:error, reason} ->
-            {:halt, {:error, {:prefetch_failed, sha, reason}}}
-        end
-      end)
-
-    case compared do
-      {:error, _} = error ->
-        error
-
-      {same, []} ->
-        Watchdog.resolve(opts[:watchdog], same)
-
-      {_same, newer} ->
-        with :ok <- Watchdog.supersede(opts[:watchdog], newer), do: {:ok, :stale_for_build}
     end
   end
 

@@ -2,7 +2,18 @@ defmodule MobDeliver.BuildChangeTest do
   # Puts a directory on the VM's code path and loads/unloads modules: not async.
   use ExUnit.Case, async: false
 
-  alias MobDeliver.{Boot, Gate, Installer, Manifest, SingleFlight, Store, TestPublisher, Watchdog}
+  alias MobDeliver.{
+    Boot,
+    Gate,
+    Installer,
+    Manifest,
+    Refresh,
+    Resolver,
+    SingleFlight,
+    Store,
+    TestPublisher,
+    Watchdog
+  }
 
   @moduletag :tmp_dir
   @moduletag :capture_log
@@ -76,7 +87,8 @@ defmodule MobDeliver.BuildChangeTest do
       store: :"bc_store_#{n}",
       watchdog: :"bc_wd_#{n}",
       gate: :"bc_gate_#{n}",
-      sf: :"bc_sf_#{n}"
+      sf: :"bc_sf_#{n}",
+      refresh: :"bc_refresh_#{n}"
     }
 
     start_supervised!({Store, name: app.store, root: ctx.root}, id: app.store)
@@ -91,6 +103,7 @@ defmodule MobDeliver.BuildChangeTest do
     )
 
     start_supervised!({SingleFlight, name: app.sf}, id: app.sf)
+    start_supervised!({Refresh, name: app.refresh}, id: app.refresh)
 
     :ok =
       Boot.run(store: app.store, watchdog: app.watchdog, verify: ctx.verify, poller: nil)
@@ -99,6 +112,32 @@ defmodule MobDeliver.BuildChangeTest do
   end
 
   defp check(ctx, app, body, blobs) do
+    Installer.check(
+      store: app.store,
+      watchdog: app.watchdog,
+      gate: app.gate,
+      single_flight: app.sf,
+      app_version: "2.0.0",
+      client_opts: serving(ctx, body, blobs)
+    )
+  end
+
+  # The user opens a screen this build doesn't bundle: navigation resolves
+  # it from the server's newest manifest (JIT), without installing it.
+  defp open(ctx, app, module, body, blobs) do
+    Resolver.resolve(module,
+      store: app.store,
+      watchdog: app.watchdog,
+      gate: app.gate,
+      single_flight: app.sf,
+      refresh: app.refresh,
+      refresh_interval: 0,
+      app_version: "2.0.0",
+      client_opts: serving(ctx, body, blobs)
+    )
+  end
+
+  defp serving(ctx, body, blobs) do
     plug = fn
       %{request_path: "/manifest"} = conn ->
         Plug.Conn.send_resp(conn, 200, body)
@@ -110,20 +149,114 @@ defmodule MobDeliver.BuildChangeTest do
         end
     end
 
-    Installer.check(
-      store: app.store,
-      watchdog: app.watchdog,
-      gate: app.gate,
-      single_flight: app.sf,
-      app_version: "2.0.0",
-      client_opts: [
-        endpoint: "https://updates.example.test",
-        app: "com.example.app",
-        channel: "production",
-        trusted_publish_key: ctx.key,
-        req_options: [plug: plug]
-      ]
-    )
+    [
+      endpoint: "https://updates.example.test",
+      app: "com.example.app",
+      channel: "production",
+      trusted_publish_key: ctx.key,
+      req_options: [plug: plug]
+    ]
+  end
+
+  # A screen this build doesn't bundle, calling the bundled (and delivered)
+  # module: opening it loads its delivered callees too.
+  defp expansion(ctx) do
+    screen = :"Elixir.MobDeliverBuild#{ctx.n}.Expansion"
+
+    {[{^screen, binary}], _} =
+      Code.with_diagnostics([log: false], fn ->
+        Code.compile_string(
+          "defmodule #{inspect(screen)} do def v, do: #{inspect(ctx.module)}.v() end"
+        )
+      end)
+
+    unload(screen)
+    on_exit(fn -> unload(screen) end)
+    {screen, binary}
+  end
+
+  # A delivers its own version of the bundled module plus an expansion
+  # screen; it's installed and proven, then a new build outgrows it.
+  defp outgrown_with_expansion(ctx, lose_blob?) do
+    build(ctx, :bundled_v1)
+    first = launch(ctx)
+    a_bytes = compile(ctx, :delivered_a)
+    {screen, screen_bytes} = expansion(ctx)
+
+    a =
+      %{
+        "modules" => %{
+          Manifest.module_key(ctx.module) => "sha256:" <> sha(a_bytes),
+          Manifest.module_key(screen) => "sha256:" <> sha(screen_bytes)
+        }
+      }
+      |> TestPublisher.fields()
+      |> TestPublisher.sign(ctx.private)
+      |> JSON.encode!()
+
+    blobs = %{sha(a_bytes) => a_bytes, sha(screen_bytes) => screen_bytes}
+    assert check(ctx, first, a, blobs) == {:ok, :installed}
+    on_a = launch(ctx)
+    :ok = Watchdog.mark_stable(on_a.watchdog)
+
+    if lose_blob?, do: File.rm!(Store.blob_path(on_a.store, sha(a_bytes)))
+    build(ctx, :bundled_v2)
+    new_build = launch(ctx)
+    # The root screen has rendered: navigation may ask the server now.
+    :ok = Watchdog.mark_stable(new_build.watchdog)
+    assert Store.active(new_build.store) == nil
+
+    {new_build, screen, a, blobs}
+  end
+
+  for {lost, title} <- [{false, "its"}, {true, "its lost"}] do
+    test "opening a screen from an outgrown manifest the server still serves doesn't load #{title} old version of a bundled module",
+         ctx do
+      {new_build, screen, a, blobs} = outgrown_with_expansion(ctx, unquote(lost))
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert open(ctx, new_build, screen, a, blobs) == {:error, :not_found}
+        end)
+
+      assert log =~ "newer bundled code"
+      assert :code.is_loaded(screen) == false
+      assert running(ctx) == :bundled_v2
+      # Remembered: the next install attempt is refused without downloading.
+      assert check(ctx, new_build, a, %{}) == {:ok, :stale_for_build}
+    end
+  end
+
+  test "navigation never loads a delivered version recorded as outgrown, whatever manifest it comes from",
+       ctx do
+    build(ctx, :bundled_v1)
+    first = launch(ctx)
+    a_bytes = compile(ctx, :delivered_a)
+    {screen, screen_bytes} = expansion(ctx)
+
+    a =
+      %{
+        "modules" => %{
+          Manifest.module_key(ctx.module) => "sha256:" <> sha(a_bytes),
+          Manifest.module_key(screen) => "sha256:" <> sha(screen_bytes)
+        }
+      }
+      |> TestPublisher.fields()
+      |> TestPublisher.sign(ctx.private)
+      |> JSON.encode!()
+
+    blobs = %{sha(a_bytes) => a_bytes, sha(screen_bytes) => screen_bytes}
+    assert check(ctx, first, a, blobs) == {:ok, :installed}
+    on_a = launch(ctx)
+    :ok = Watchdog.mark_stable(on_a.watchdog)
+
+    # Recorded as outgrown while A is still active (and the module unloaded).
+    :ok = Watchdog.supersede(on_a.watchdog, [{Manifest.module_key(ctx.module), sha(a_bytes)}])
+    unload(ctx.module)
+
+    assert open(ctx, on_a, screen, a, blobs) == {:error, :stale_for_build}
+    assert :code.is_loaded(screen) == false
+    assert running(ctx) == :bundled_v1
   end
 
   defp running(ctx), do: ctx.module.v()

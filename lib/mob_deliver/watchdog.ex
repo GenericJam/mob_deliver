@@ -214,6 +214,14 @@ defmodule MobDeliver.Watchdog do
   @spec resolve(server(), [{String.t(), Manifest.sha256()}]) :: :ok | {:error, term()}
   def resolve(server, pairs), do: GenServer.call(server, {:resolve, pairs})
 
+  @doc """
+  The `{key, sha}` pairs among `pairs` that this build outgrew: superseded,
+  or unresolved (not compared yet). Code about to load is checked with it.
+  """
+  @spec outgrown(server(), [{String.t(), Manifest.sha256()}]) ::
+          [{String.t(), Manifest.sha256()}]
+  def outgrown(server, pairs), do: GenServer.call(server, {:outgrown, pairs})
+
   @doc "The rollback notice, once: returns it and clears it."
   @spec take_notice(server()) :: notice() | nil
   def take_notice(server), do: GenServer.call(server, :take_notice)
@@ -299,6 +307,11 @@ defmodule MobDeliver.Watchdog do
 
   def handle_call({:unresolved, manifest}, _from, s),
     do: {:reply, unresolved_in(s, manifest), s}
+
+  def handle_call({:outgrown, pairs}, _from, s) do
+    outgrown = MapSet.new(s.state.superseded ++ s.state.unresolved)
+    {:reply, Enum.filter(pairs, &MapSet.member?(outgrown, &1)), s}
+  end
 
   def handle_call(:ready?, _from, s), do: {:reply, s.state.armed == nil, s}
 
@@ -404,6 +417,8 @@ defmodule MobDeliver.Watchdog do
   defp unreadable_reply({:rejected?, _id, _manifest}, _reason), do: true
   defp unreadable_reply({:superseded?, _manifest}, _reason), do: true
   defp unreadable_reply({:unresolved, _manifest}, _reason), do: []
+  # Unknown: nothing is known not to be outgrown.
+  defp unreadable_reply({:outgrown, pairs}, _reason), do: pairs
   defp unreadable_reply(:take_notice, _reason), do: nil
   defp unreadable_reply(:notice, _reason), do: nil
   defp unreadable_reply(_request, reason), do: {:error, {:watchdog_unreadable, reason}}

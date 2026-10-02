@@ -7,7 +7,7 @@ defmodule MobDeliver.Build do
   # override code newer than what they were built against, so the manifest
   # is stale for this build. See the ADR's "Builds change under manifests".
 
-  alias MobDeliver.{Bundled, Manifest, Store}
+  alias MobDeliver.{Bundled, Fetcher, Manifest, Store, Watchdog}
 
   @type pairs :: %{String.t() => Manifest.sha256()}
 
@@ -31,7 +31,7 @@ defmodule MobDeliver.Build do
       refuse from now on; `unresolved` are the ones whose delivered blob
       isn't on the device (lost or corrupt) to compare, so it can't be
       told whether this build ships them: an install that brings them
-      back compares them then (`matches_bundled?/3`).
+      back compares them then (`settle_unresolved/2`).
   """
   @spec check(Store.server(), Store.manifest_id(), Manifest.t(), Bundled.index()) ::
           :ok | {:adopt, Store.base()} | {:stale, pairs(), pairs()}
@@ -64,11 +64,66 @@ defmodule MobDeliver.Build do
   end
 
   @doc """
-  Whether delivered `binary` for `key` would override nothing newer in
-  this build: the build doesn't bundle `key`, or bundles exactly that code.
+  Whether a manifest that isn't in a slot (fetched for an install or for
+  a JIT refresh) may run on this build: `{:ok, :stale_for_build}` if it
+  ships a version a newer build superseded, else `settle_unresolved/2`.
   """
-  @spec matches_bundled?(String.t(), binary(), Bundled.index()) :: boolean()
-  def matches_bundled?(key, binary, index) do
+  @spec fits(Manifest.t(), keyword()) :: :ok | {:ok, :stale_for_build} | {:error, term()}
+  def fits(%Manifest{} = manifest, opts) do
+    if Watchdog.superseded?(opts[:watchdog], manifest),
+      do: {:ok, :stale_for_build},
+      else: settle_unresolved(manifest, opts)
+  end
+
+  @doc """
+  Compares the unresolved versions `manifest` ships — versions of a
+  manifest this build outgrew whose blobs weren't on the device to compare
+  when it did (`Watchdog.supersede/3`) — with the bundled code, fetching
+  their blobs (`opts` as for `MobDeliver.Fetcher.ensure_blob/2`, plus
+  `:watchdog`). All identical to this build's bundled code (or no longer
+  bundled): nothing newer is overridden, they're cleared, `:ok`.
+  Otherwise they're superseded like any outgrown version:
+  `{:ok, :stale_for_build}`. A blob that can't be fetched leaves them
+  unresolved: `{:error, {:prefetch_failed, sha, reason}}`.
+  """
+  @spec settle_unresolved(Manifest.t(), keyword()) ::
+          :ok | {:ok, :stale_for_build} | {:error, term()}
+  def settle_unresolved(%Manifest{} = manifest, opts) do
+    case Watchdog.unresolved(opts[:watchdog], manifest) do
+      [] -> :ok
+      pending -> compare_unresolved(pending, Bundled.index(), opts)
+    end
+  end
+
+  defp compare_unresolved(pending, index, opts) do
+    compared =
+      Enum.reduce_while(pending, {[], []}, fn {key, sha} = pair, {same, newer} ->
+        case Fetcher.ensure_blob(sha, opts) do
+          {:ok, binary} ->
+            if matches_bundled?(key, binary, index),
+              do: {:cont, {[pair | same], newer}},
+              else: {:cont, {same, [pair | newer]}}
+
+          {:error, reason} ->
+            {:halt, {:error, {:prefetch_failed, sha, reason}}}
+        end
+      end)
+
+    case compared do
+      {:error, _} = error ->
+        error
+
+      {same, []} ->
+        Watchdog.resolve(opts[:watchdog], same)
+
+      {_same, newer} ->
+        with :ok <- Watchdog.supersede(opts[:watchdog], newer), do: {:ok, :stale_for_build}
+    end
+  end
+
+  # Overrides nothing newer: the build doesn't bundle `key`, or bundles
+  # exactly that code.
+  defp matches_bundled?(key, binary, index) do
     case Bundled.md5s(index, [key]) do
       %{^key => bundled} -> Bundled.md5(binary) == {:ok, bundled}
       _not_bundled -> true

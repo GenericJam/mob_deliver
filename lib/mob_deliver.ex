@@ -134,11 +134,15 @@ defmodule MobDeliver do
   `state/0`.
 
   **When an install applies.** A running session keeps the code it has
-  loaded, and on mob that's every bundled module, loaded at launch. So a
-  new version of a module the app already runs applies at the next launch;
-  only modules not loaded yet (e.g. a JIT screen not opened this session)
-  use it right away. `check(details: true)` and `state/0` say when that's
-  the case (`restart_required`), so the app can offer "Restart to update".
+  loaded (mob loads modules on first use, as the BEAM's interactive mode
+  does: the root screen and whatever it called are loaded right after
+  launch). So a new version of a module the app already loaded applies at
+  the next launch. A screen not opened yet this session, and the delivered
+  modules it calls, use it when first navigated to; a bundled module first
+  called directly by other code loads its bundled version until the next
+  launch. `check(details: true)` and `state/0` say when a loaded module
+  has a newer installed version (`restart_required`), so the app can offer
+  "Restart to update".
   """
   @spec check() :: {:ok, check_outcome()} | {:error, term()}
   def check, do: check([])

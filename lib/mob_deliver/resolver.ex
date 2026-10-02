@@ -6,6 +6,7 @@ defmodule MobDeliver.Resolver do
   require Logger
 
   alias MobDeliver.{
+    Build,
     Config,
     Fetcher,
     Gate,
@@ -123,17 +124,39 @@ defmodule MobDeliver.Resolver do
           log_absent(module, age, opts)
           :bundled
 
-        runnable?(id, latest, opts) ->
-          {:ok, modules}
-
-        true ->
+        not runnable?(id, latest, opts) ->
           Logger.warning(
             "mob_deliver: #{inspect(module)} is in the server's newest manifest, but that " <>
               "manifest is below this app's floor or was rolled back on this device"
           )
 
           :bundled
+
+        true ->
+          fitting(module, modules, latest, opts)
       end
+    end
+  end
+
+  # The same rule as an install (MobDeliver.Build): a manifest shipping a
+  # version this build outgrew would load old code over newer bundled code
+  # (its closure includes the delivered callees not loaded yet).
+  defp fitting(module, modules, latest, opts) do
+    case Build.fits(latest, opts) do
+      :ok ->
+        {:ok, modules}
+
+      {:ok, :stale_for_build} ->
+        Logger.warning(
+          "mob_deliver: #{inspect(module)} is in the server's newest manifest, but that " <>
+            "manifest ships module versions this app build has newer bundled code for; " <>
+            "not delivering it (publish from the source this build was made from)"
+        )
+
+        :bundled
+
+      {:error, _} = error ->
+        error
     end
   end
 
@@ -203,6 +226,7 @@ defmodule MobDeliver.Resolver do
   # rollback suspects what ran; if that fails, nothing loads.
   defp deliver(module, modules, opts) do
     with {:ok, order} <- closure([module], [], MapSet.new(), modules, opts),
+         :ok <- fits_build(module, order, opts),
          :ok <- note_loaded(order, opts) do
       Enum.reduce_while(order, :ok, fn {mod, sha, binary}, :ok ->
         case load_once(mod, sha, binary, opts) do
@@ -213,12 +237,31 @@ defmodule MobDeliver.Resolver do
     end
   end
 
-  defp note_loaded([], _opts), do: :ok
+  # Last line before loading: nothing whose version this build outgrew
+  # (see fitting/4; the active manifest is checked at boot).
+  defp fits_build(_module, [], _opts), do: :ok
 
-  defp note_loaded(order, opts) do
-    pairs = Map.new(order, fn {mod, sha, _binary} -> {Manifest.module_key(mod), sha} end)
-    Watchdog.note_loaded(opts[:watchdog], pairs)
+  defp fits_build(module, order, opts) do
+    case Watchdog.outgrown(opts[:watchdog], pairs(order)) do
+      [] ->
+        :ok
+
+      outgrown ->
+        Logger.warning(
+          "mob_deliver: not loading #{inspect(module)}: it would load " <>
+            "#{Enum.map_join(outgrown, ", ", &elem(&1, 0))} older than this app build's " <>
+            "newer bundled code"
+        )
+
+        {:error, :stale_for_build}
+    end
   end
+
+  defp note_loaded([], _opts), do: :ok
+  defp note_loaded(order, opts), do: Watchdog.note_loaded(opts[:watchdog], Map.new(pairs(order)))
+
+  defp pairs(order),
+    do: Enum.map(order, fn {mod, sha, _binary} -> {Manifest.module_key(mod), sha} end)
 
   # Breadth-first from the target; the result is reversed discovery order,
   # so deeper callees come first and the target last.
