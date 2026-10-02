@@ -8,6 +8,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ## [Unreleased]
 
+### Fixed
+- Opening a screen from the server's newest manifest (JIT) no longer loads
+  a version of a bundled module that a newer app build has outgrown
+  (MOB-361). 0.3.0 refused such a manifest at install, but navigation could
+  still load it, and with it the delivered callees not loaded yet, over the
+  newer bundled code for the session. The refresh path now follows the
+  install's rule: a manifest shipping an outgrown version isn't used
+  (logged), its uncompared versions are compared first, and the resolver
+  never loads a module version recorded as outgrown
+  (`{:error, :stale_for_build}`).
+- Docs: mob loads modules on first use (interactive mode), not all at
+  launch, as the 0.3.0 notes on `restart_required` said. An installed
+  update applies at the next launch to modules the session has loaded; a
+  screen not opened yet takes it when first navigated to.
+
 ## [0.3.0] - 2026-10-02
 
 ### Fixed
@@ -26,8 +41,6 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
   neither slot's outgrown versions can come back, and a delivered version
   whose blob was lost when the build outgrew it is compared with the
   bundled code when an install brings it back (refused unless identical).
-  Opening a screen from the server's newest manifest (JIT) follows the same
-  rule, so it can't load an outgrown version of a bundled module either.
   Manifests installed by 0.2.1 or earlier are retired once if they
   override bundled modules with different code.
 - Changing `config :mob_deliver` no longer aborts every `mix` run until
@@ -56,9 +69,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
   `nil`; `open_store/0` returns `{:error, _}` instead of raising.
 - `MobDeliver.check(details: true)` → `{:ok, outcome, %{restart_required:
   boolean}}`, and `restart_required` in `state/0` (MOB-355): true while the
-  active manifest has new versions of modules this session has already
-  loaded, which apply at the next launch, so an app can offer "Restart to
-  update". `check/0` keeps its return shape.
+  active manifest has new versions of modules this session already runs,
+  which apply at the next launch (on mob that's every bundled module), so
+  an app can offer "Restart to update". `check/0` keeps its return shape.
 
 ### Changed
 - Delivered code can never replace the code that decides what's trusted:
