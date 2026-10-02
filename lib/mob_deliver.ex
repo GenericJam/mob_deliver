@@ -127,13 +127,26 @@ defmodule MobDeliver do
       unset on this device (logged).
     * `{:error, reason}` — fetch, verification, or prefetch failed; nothing
       changed. Network and TLS failures are `{:transport, _}`.
+    * `{:error, :not_running}` — mob_deliver's processes aren't running
+      (host tests, or before mob started the plugin).
 
-  Concurrent calls share one check.
+  Concurrent calls share one check. The result and its time are kept for
+  `state/0`.
   """
   @spec check() :: {:ok, check_outcome()} | {:error, term()}
-  def check,
-    do:
-      MobDeliver.SingleFlight.run(MobDeliver.SingleFlight, :check, &MobDeliver.Installer.check/0)
+  def check do
+    result =
+      running(fn ->
+        MobDeliver.SingleFlight.run(
+          MobDeliver.SingleFlight,
+          :check,
+          &MobDeliver.Installer.check/0
+        )
+      end)
+
+    if result != {:error, :not_running}, do: MobDeliver.Status.put_check(result)
+    result
+  end
 
   @doc false
   # mob_wake :push handler registered as :mob_deliver_check (see MobDeliver.Poller).
@@ -199,10 +212,11 @@ defmodule MobDeliver do
 
   Concurrent calls for the same module share one fetch. Never kills
   processes to load: if an old version is still running,
-  `{:error, :old_code_in_use}`.
+  `{:error, :old_code_in_use}`. `{:error, :not_running}` while
+  mob_deliver's processes aren't running.
   """
   @spec resolve(module()) :: :ok | {:error, term()}
-  def resolve(module), do: MobDeliver.Resolver.resolve(module)
+  def resolve(module), do: running(fn -> MobDeliver.Resolver.resolve(module) end)
 
   @doc """
   Plugin lifecycle `on_start` (see `priv/mob_plugin.exs`). Runs before the
@@ -226,15 +240,26 @@ defmodule MobDeliver do
   dies before getting here, the next boot rolls the manifest back.
   """
   @spec mark_stable() :: :ok | {:error, term()}
-  def mark_stable, do: MobDeliver.Watchdog.mark_stable(MobDeliver.Watchdog)
+  def mark_stable, do: running(fn -> MobDeliver.Watchdog.mark_stable(MobDeliver.Watchdog) end)
 
   @doc """
   Returns `%{rolled_back: manifest_id, at: DateTime.t()}` exactly once
   after the watchdog rolled back a failed update, else `nil`. Show the
   user a one-time "your last update failed and was rolled back" notice.
+  See `rollback_notice/0` to read it without consuming it.
   """
   @spec take_rollback_notice() :: MobDeliver.Watchdog.notice() | nil
-  def take_rollback_notice, do: MobDeliver.Watchdog.take_notice(MobDeliver.Watchdog)
+  def take_rollback_notice,
+    do: running(fn -> MobDeliver.Watchdog.take_notice(MobDeliver.Watchdog) end, nil)
+
+  @doc """
+  The pending rollback notice, without consuming it (`nil` if there is
+  none, or once `take_rollback_notice/0` took it) — e.g. for a settings
+  screen that shows it until the user dismisses it.
+  """
+  @spec rollback_notice() :: MobDeliver.Watchdog.notice() | nil
+  def rollback_notice,
+    do: running(fn -> MobDeliver.Watchdog.notice(MobDeliver.Watchdog) end, nil)
 
   @doc """
   The forced-update window for this app version right now (see
@@ -242,9 +267,60 @@ defmodule MobDeliver do
   available" banner that calls `open_store/0` — or `{:required, info}`.
   Needs `:store_url`; the app's version comes from mob's native accessor
   (`Mob.Device.app_version()`) or `config :mob_deliver, app_version: "1.4.0"`.
+  `:ok` while mob_deliver isn't running.
   """
   @spec update_status() :: MobDeliver.Gate.status()
-  def update_status, do: MobDeliver.Gate.status()
+  def update_status, do: running(&MobDeliver.Gate.status/0, :ok)
+
+  @typedoc "See `state/0`."
+  @type state :: %{
+          running: boolean(),
+          active: %{id: String.t(), issued_at: DateTime.t()} | nil,
+          last_check: %{result: term(), at: DateTime.t()} | nil,
+          update_status: MobDeliver.Gate.status(),
+          rollback_notice: MobDeliver.Watchdog.notice() | nil
+        }
+
+  @doc """
+  Delivered-code state for an "app version" or diagnostics screen. Never
+  raises; while mob_deliver isn't running (host tests, early boot) it
+  reports `running: false` and empty values.
+
+    * `:active` — the active manifest's id and `issued_at`, or `nil` when
+      the app runs its bundled code.
+    * `:last_check` — the last `check/0`'s result (by the poller, a push,
+      or the app) and when it finished, or `nil` before the first.
+    * `:update_status` — as `update_status/0`.
+    * `:rollback_notice` — as `rollback_notice/0` (not consumed).
+  """
+  @spec state() :: state()
+  def state do
+    %{
+      running: running?(),
+      active: running(&active/0, nil),
+      last_check: MobDeliver.Status.last_check(),
+      update_status: update_status(),
+      rollback_notice: rollback_notice()
+    }
+  end
+
+  defp active do
+    case MobDeliver.Store.active(MobDeliver.Store) do
+      {id, manifest} -> %{id: id, issued_at: manifest.issued_at}
+      nil -> nil
+    end
+  end
+
+  defp running?, do: Process.whereis(MobDeliver.Store) != nil
+
+  # Runs `fun` unless mob_deliver's processes are down (then, or if it
+  # raises or exits because they went down meanwhile, `default`).
+  defp running(fun, default \\ {:error, :not_running}) do
+    if running?(), do: fun.(), else: default
+  catch
+    :exit, _ -> default
+    :error, %ArgumentError{} -> default
+  end
 
   @doc """
   The screen to boot into: `screen`, or `update_screen` (default
@@ -267,30 +343,32 @@ defmodule MobDeliver do
   """
   @spec root_screen(module(), module()) :: module()
   def root_screen(screen, update_screen \\ MobDeliver.UpdateRequiredScreen) do
-    booted =
-      case update_status() do
-        {:required, _} -> update_screen
-        _ -> screen
-      end
+    if running?() do
+      booted =
+        case update_status() do
+          {:required, _} -> update_screen
+          _ -> screen
+        end
 
-    MobDeliver.GateNavigation.put_root(screen, booted, update_screen)
-    booted
-  catch
-    kind, reason ->
+      MobDeliver.GateNavigation.put_root(screen, booted, update_screen)
+      booted
+    else
       Logger.error(
-        "mob_deliver: update gate unavailable, booting #{inspect(screen)} " <>
-          "(#{Exception.format_banner(kind, reason, __STACKTRACE__)})"
+        "mob_deliver: update gate unavailable (mob_deliver isn't running), booting #{inspect(screen)}"
       )
 
       screen
+    end
   end
 
-  @doc "Opens `config :mob_deliver, :store_url` (the app's store page)."
-  @spec open_store() :: :ok | {:error, :no_store_url}
+  @doc "Opens `config :mob_deliver, :store_url` (the app's store page). Never raises."
+  @spec open_store() :: :ok | {:error, term()}
   def open_store do
     case MobDeliver.Config.get(:store_url) do
       nil -> {:error, :no_store_url}
       url -> Mob.Device.open_url(url)
     end
+  catch
+    kind, reason -> {:error, {kind, reason}}
   end
 end

@@ -6,6 +6,7 @@ defmodule MobDeliver.Application do
   @impl true
   def start(_type, _args) do
     children = [
+      MobDeliver.Status,
       MobDeliver.SingleFlight,
       MobDeliver.Store,
       MobDeliver.Watchdog,

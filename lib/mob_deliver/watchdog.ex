@@ -202,6 +202,10 @@ defmodule MobDeliver.Watchdog do
   @spec take_notice(server()) :: notice() | nil
   def take_notice(server), do: GenServer.call(server, :take_notice)
 
+  @doc "The rollback notice, without clearing it."
+  @spec notice(server()) :: notice() | nil
+  def notice(server), do: GenServer.call(server, :notice)
+
   # ── server ──────────────────────────────────────────────────────────────
 
   # `booted` is the manifest this session booted under probation.
@@ -342,6 +346,8 @@ defmodule MobDeliver.Watchdog do
   def handle_call({:rejected?, id, manifest}, _from, s),
     do: {:reply, refused?(s, id, manifest), s}
 
+  def handle_call(:notice, _from, s), do: {:reply, s.state.notice, s}
+
   def handle_call(:take_notice, _from, s) do
     case s.state.notice do
       nil ->
@@ -380,6 +386,7 @@ defmodule MobDeliver.Watchdog do
   defp unreadable_reply({:rejected?, _id, _manifest}, _reason), do: true
   defp unreadable_reply({:superseded?, _manifest}, _reason), do: true
   defp unreadable_reply(:take_notice, _reason), do: nil
+  defp unreadable_reply(:notice, _reason), do: nil
   defp unreadable_reply(_request, reason), do: {:error, {:watchdog_unreadable, reason}}
 
   defp reply({reply, s}), do: {:reply, reply, s}

@@ -151,14 +151,22 @@ def on_start do
   {:ok, _} = Mob.Screen.start_root(MobDeliver.root_screen(MyApp.HomeScreen))
 end
 
-# Once per launch, e.g. in the root screen's mount:
+# Once per launch, e.g. in the root screen's mount (rollback_notice/0
+# reads it without consuming it, e.g. for a settings screen):
 if MobDeliver.take_rollback_notice(), do: show_notice("Your last update failed and was rolled back.")
 
 case MobDeliver.update_status() do
   {:recommended, _info} -> show_update_banner()  # its button calls MobDeliver.open_store()
   _ -> :ok
 end
+
+# For an "app version" / diagnostics row: the active manifest (id,
+# issued_at), the last check's result and time, the gate, the notice.
+MobDeliver.state()
 ```
+
+None of the public functions raise when mob_deliver isn't running (host
+tests, early boot): they return `:ok`, `nil` or `{:error, :not_running}`.
 
 Navigating to a screen that isn't on the device just works: mob's router
 calls mob_deliver before mounting it, which fetches it (once the first

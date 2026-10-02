@@ -27,6 +27,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
   malformed key stops the plugin at boot with a message saying what to
   fix, and leaves stored manifests alone.
 
+### Added
+- `MobDeliver.state/0` (MOB-358): the active manifest's id and
+  `issued_at`, the last check's result and time, the update gate and the
+  pending rollback notice, for an "app version" or diagnostics screen.
+- `MobDeliver.rollback_notice/0`: the pending rollback notice, without
+  consuming it.
+- No public function raises when mob_deliver isn't running (host tests,
+  early boot): `update_status/0` → `:ok`, `check/0`, `resolve/1`,
+  `mark_stable/0` → `{:error, :not_running}`, the notice functions →
+  `nil`; `open_store/0` returns `{:error, _}` instead of raising.
+
 ### Changed
 - Delivered code can never replace the code that decides what's trusted:
   a manifest delivering `mob_app_config`, `MobDeliver.*`, `Mob.*`,
