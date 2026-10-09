@@ -6,6 +6,17 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ---
 
+## [Unreleased]
+
+### Added
+- **On-device self-test** (MOB-411). `MobDeliver.SelfTest` implements
+  `Mob.Plugin.SelfTest` and is declared in the manifest as `selftest:`. It
+  fails if the `:mob_deliver` application is not running, reads
+  `MobDeliver.state/0`, then writes one probe blob through
+  `MobDeliver.Store.put_blob/3` on the device's data dir, reads it back
+  hash-verified and deletes it. Run it with `mix mob.selftest` from a host
+  app (mob_dev 0.7.17). Requires mob 0.9.15.
+
 ## [0.3.1] - 2026-10-02
 
 ### Fixed
