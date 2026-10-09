@@ -55,6 +55,12 @@ defmodule MobDeliver.SelfTestTest do
     assert reason =~ "not configured on this host: :app unset"
   end
 
+  test "fails when the configured publish key is not a key (the plugin skips its boot)" do
+    Application.put_env(:mob_deliver, :trusted_publish_key, "not-a-key")
+    assert {:fail, reason} = MobDeliver.SelfTest.run(@ctx)
+    assert reason =~ "trusted_publish_key is not a valid ed25519 key"
+  end
+
   test "fails, naming the cause, when the application is not running" do
     :ok = Application.stop(:mob_deliver)
 

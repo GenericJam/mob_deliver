@@ -32,7 +32,12 @@ defmodule MobDeliver.SelfTest do
       %{running: true} ->
         case Config.missing() do
           [] ->
-            blob_round_trip()
+            if MobDeliver.Manifest.valid_key?(Config.trusted_publish_key()),
+              do: blob_round_trip(),
+              else:
+                {:fail,
+                 "config :mob_deliver, :trusted_publish_key is not a valid ed25519 key; " <>
+                   "the plugin skips its boot"}
 
           missing ->
             {:skip,
