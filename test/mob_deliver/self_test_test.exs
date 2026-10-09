@@ -7,9 +7,22 @@ defmodule MobDeliver.SelfTestTest do
 
   @plugin_dir Path.expand("../..", __DIR__)
   @ctx %{platform: :ios, device: :simulator}
+  @config [endpoint: nil, app: nil, channel: nil, trusted_publish_key: nil]
 
   setup do
-    on_exit(fn -> {:ok, _} = Application.ensure_all_started(:mob_deliver) end)
+    saved = Enum.map(@config, fn {k, _} -> {k, Application.get_env(:mob_deliver, k)} end)
+
+    on_exit(fn ->
+      Enum.each(saved, fn {k, v} -> Application.put_env(:mob_deliver, k, v) end)
+      {:ok, _} = Application.ensure_all_started(:mob_deliver)
+    end)
+
+    {key, _} = MobDeliver.TestPublisher.keypair()
+    Application.put_env(:mob_deliver, :endpoint, "https://deliver.example.com")
+    Application.put_env(:mob_deliver, :app, "com.example.app")
+    Application.put_env(:mob_deliver, :channel, "production")
+    Application.put_env(:mob_deliver, :trusted_publish_key, key)
+    :ok
   end
 
   test "the manifest declares it and the validator raises no selftest warning" do
@@ -19,11 +32,27 @@ defmodule MobDeliver.SelfTestTest do
     refute Enum.any?(warnings, &(&1 =~ "selftest"))
   end
 
-  test "passes against the running application and leaves no blob behind" do
-    before = Path.wildcard(Path.join(Store.root(Store), "blobs/*"))
+  test "passes against the running, configured application and leaves nothing behind" do
+    before = Path.wildcard(Path.join(Store.root(Store), "*"))
 
     assert MobDeliver.SelfTest.run(@ctx) == :pass
-    assert Path.wildcard(Path.join(Store.root(Store), "blobs/*")) == before
+    assert Path.wildcard(Path.join(Store.root(Store), "*")) == before
+  end
+
+  test "fails when the store cannot be written" do
+    root = Store.root(Store)
+    File.mkdir_p!(root)
+    File.chmod!(root, 0o500)
+    on_exit(fn -> File.chmod!(root, 0o700) end)
+
+    assert {:fail, reason} = MobDeliver.SelfTest.run(@ctx)
+    assert reason =~ "could not start a store" or reason =~ "store round trip"
+  end
+
+  test "skips, naming the missing keys, when the plugin is not configured" do
+    Application.delete_env(:mob_deliver, :app)
+    assert {:skip, reason} = MobDeliver.SelfTest.run(@ctx)
+    assert reason =~ "not configured on this host: :app unset"
   end
 
   test "fails, naming the cause, when the application is not running" do
