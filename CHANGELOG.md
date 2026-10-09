@@ -6,16 +6,21 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ---
 
-## [Unreleased]
+## [0.3.2] - 2026-10-09
 
 ### Added
 - **On-device self-test** (MOB-411). `MobDeliver.SelfTest` implements
   `Mob.Plugin.SelfTest` and is declared in the manifest as `selftest:`. It
   fails if the `:mob_deliver` application is not running, skips (naming the
-  keys) on a host that never configured the plugin, otherwise reads
-  `MobDeliver.state/0` and round-trips one probe blob through a private
-  `MobDeliver.Store` on a scratch dir under the store root, deleted after. Run it with `mix mob.selftest` from a host
-  app (mob_dev 0.7.17). Requires mob 0.9.15.
+  keys) on a host that never configured the plugin, fails if
+  `config :mob_deliver, :trusted_publish_key` is not a valid ed25519 key,
+  otherwise reads `MobDeliver.state/0` and round-trips one probe blob
+  through a private `MobDeliver.Store` on a scratch dir under the store
+  root, deleted after. Run it with `mix mob.selftest` from a host app
+  (mob_dev 0.7.17).
+
+### Changed
+- Requires mob >= 0.9.15 (was `~> 0.9.6`), for `Mob.Plugin.SelfTest`.
 
 ## [0.3.1] - 2026-10-02
 

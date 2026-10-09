@@ -10,7 +10,7 @@ defmodule MobDeliver.SelfTest do
   before `on_start`; without it every call would exit and the router hook
   would refuse navigation), reads `MobDeliver.state/0` the way a diagnostics
   screen does, then writes one probe blob through a private
-  `MobDeliver.Store` on a scratch dir beside the real store, reads it back
+  `MobDeliver.Store` on a scratch dir under the real store's root, reads it back
   hash-verified with `read_blob/2`, and deletes the dir. A private store
   keeps the probe out of the boot-time blob GC's way and leaves nothing
   behind. A host that never configured the plugin (`config :mob_deliver`
