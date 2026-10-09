@@ -67,7 +67,7 @@ defmodule MobDeliver.MixProject do
       mob_dep(),
       # Plugin manifest validator lives here. Dev/test only — the host app
       # supplies mob_dev at build time.
-      {:mob_dev, "~> 0.7.3", only: [:dev, :test], runtime: false},
+      {:mob_dev, "~> 0.7.17", only: [:dev, :test], runtime: false},
       # HTTP for the manifest/beam fetches. Runtime dep; ranges cover the
       # Req versions sibling apps already ship on-device.
       {:req, "~> 0.5 or ~> 0.6 or ~> 0.7"},
@@ -85,7 +85,7 @@ defmodule MobDeliver.MixProject do
 
   defp mob_dep do
     case System.get_env("MOB_PATH") do
-      nil -> {:mob, "~> 0.9.6", runtime: false}
+      nil -> {:mob, "~> 0.9.15", runtime: false}
       path -> {:mob, path: path, runtime: false, override: true}
     end
   end

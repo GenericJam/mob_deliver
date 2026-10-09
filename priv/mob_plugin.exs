@@ -32,5 +32,9 @@
     # backgrounded app's network) and catch up on return.
     on_resume: {MobDeliver, :on_resume, []},
     on_background: {MobDeliver, :on_background, []}
-  }
+  },
+  # On-device proof for `mix mob.selftest` / mob_ci: the application is up
+  # and a probe blob round-trips the content-addressed store on the device's
+  # data dir (see Mob.Plugin.SelfTest).
+  selftest: MobDeliver.SelfTest
 }
