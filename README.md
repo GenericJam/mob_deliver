@@ -46,6 +46,10 @@ and `mob_deliver` to actually pull + install; they compose naturally.
 - Content-addressed on-device BEAM store.
 - Manifest fetch + Ed25519 signature verification against a trusted key
   baked into the shipped app.
+- Replay protection: a device never uses a manifest older than the newest
+  one it has verified, so an old signed publish can't be served again to
+  bring back fixed code
+  ([decision](decisions/2026-10-15-replay-floor.md)).
 - Delivered modules load at launch, before any app code runs; screens not
   on the device yet load on first navigation (`:code.load_binary/3`).
 - Slot-based watchdog + rollback for updates that DO touch boot.

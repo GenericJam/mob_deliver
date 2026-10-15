@@ -29,6 +29,15 @@ defmodule MobDeliver.TestPublisher do
     )
   end
 
+  # A publish newer than every earlier one in this VM (seconds after the
+  # default issued_at): a device refuses a manifest that isn't newer than
+  # the newest it has verified (MobDeliver.Floor).
+  def next_issued_at do
+    ~U[2026-09-19 22:00:00Z]
+    |> DateTime.add(System.unique_integer([:monotonic, :positive]))
+    |> DateTime.to_iso8601()
+  end
+
   def sign(fields, private) do
     signature = :crypto.sign(:eddsa, :none, Manifest.signing_payload(fields), [private, :ed25519])
     Map.put(fields, "signature", "ed25519:" <> Base.encode64(signature))

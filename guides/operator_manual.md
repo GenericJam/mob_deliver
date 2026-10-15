@@ -135,8 +135,11 @@ forward "/deliver", MobDeliverServer.Plug,
   ETag) — a CDN can cache it indefinitely.
 * `POST /manifest` is `no-cache`; it needs a server (a pure static host
   can't answer a POST).
-* Serve over HTTPS. The signature protects integrity regardless, but TLS
-  keeps delivered code private and stops trivial replay of an old manifest.
+* Serve over HTTPS. The signature protects integrity regardless, and a
+  device refuses a manifest older than the newest it has seen (see
+  "Only a newer publish installs" below); TLS keeps delivered code private
+  and keeps a device that hasn't seen your newest publish yet from being
+  served an older one.
 * For S3/GCS, implement `MobDeliverServer.Storage` and call
   `MobDeliverServer.build/2` + `publish/2` from your own task.
 
@@ -182,6 +185,27 @@ of the new build, publish again from the source that build was made from;
 that installs normally. If the new build ships exactly the delivered code
 (you folded an OTA fix into the store build), the manifest stays active
 and nothing is refused.
+
+**Only a newer publish installs.** A device never uses a manifest older
+than the newest one it has verified (by `issued_at`, installed or not):
+`check/0` → `{:error, {:downgrade, info}}`, logged as `mob_deliver:
+manifest … isn't newer than manifest …`, and navigation won't load
+screens from it either. That stops anyone who can answer `POST /manifest`
+(your server, or a man-in-the-middle on plain HTTP) from replaying an old
+signed publish to bring back code you've since fixed. So:
+
+* To back out a bad update, **publish again** from the older source
+  (a new `issued_at`). Putting the old manifest file back on the server
+  only reaches devices that never fetched the newer one.
+* Two different manifests with the same `issued_at` (the publish task
+  uses the current second) are refused on any device that saw the other
+  one first. Don't publish twice within a second.
+* A publish dated in the future (a machine with a wrong clock) holds every
+  device that fetches it above all later publishes until that time
+  passes. To ship before then, publish with an `issued_at` after it
+  (`MobDeliverServer.build/2` takes `:issued_at`), and do so for every
+  publish until the bad time has passed: a normal publish stamps the
+  current time and is refused until then.
 
 ## 5. Update window
 
@@ -329,6 +353,7 @@ nothing changed:
 | `{:ok, :rejected}` | the manifest still ships every module version a rolled-back update introduced on this device (log: `refusing … any manifest that still has all of …`); change one of them |
 | `{:ok, :stale_for_build}` | the manifest ships module versions this device's build has newer bundled code for (section 4); publish from the build's source |
 | `{:error, {:protected_modules, keys}}` | the manifest would replace mob_deliver's, mob's or the app config's own code (or Elixir/crypto); never installed — remove those modules from what you publish |
+| `{:error, {:downgrade, info}}` | the server's manifest is older than (or a different one with the same `issued_at` as) the newest this device has verified — `info.newest_id`/`newest_issued_at` (section 4, "Only a newer publish installs"); publish again |
 
 A navigation that does nothing logs `mob_deliver: navigation to X refused,
 it couldn't be delivered (reason)` (the same reasons as above). A module

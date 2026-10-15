@@ -12,6 +12,7 @@ defmodule MobDeliver.Installer do
     Client,
     Config,
     Fetcher,
+    Floor,
     Gate,
     Loader,
     Manifest,
@@ -44,19 +45,30 @@ defmodule MobDeliver.Installer do
 
       id = Store.manifest_id(body)
       expected = Store.active_id(opts[:store])
-      protected = Protected.in_manifest(manifest)
 
-      # Cheap pre-checks so nothing is downloaded for an install that can't
-      # happen; Watchdog.install/5 re-checks the watchdog ones atomically.
-      cond do
-        id == expected -> {:ok, :current}
-        protected != [] -> refuse_protected(id, protected)
-        not Gate.installable?(manifest, opts[:app_version]) -> {:ok, :below_min_version}
-        Watchdog.rejected?(opts[:watchdog], id, manifest) -> {:ok, :rejected}
-        Watchdog.superseded?(opts[:watchdog], manifest) -> stale_for_build(id)
-        not Watchdog.ready_to_install?(opts[:watchdog]) -> {:ok, :deferred}
-        true -> install(id, body, manifest, expected, opts)
+      # The replay floor (MobDeliver.Floor) is checked after the gate has
+      # recorded this manifest: a newer one is the floor itself by then.
+      if id == expected do
+        {:ok, :current}
+      else
+        with :ok <- Floor.check(id, manifest, opts),
+             do: precheck(id, body, manifest, expected, opts)
       end
+    end
+  end
+
+  # Cheap pre-checks so nothing is downloaded for an install that can't
+  # happen; Watchdog.install/5 re-checks the watchdog ones atomically.
+  defp precheck(id, body, manifest, expected, opts) do
+    protected = Protected.in_manifest(manifest)
+
+    cond do
+      protected != [] -> refuse_protected(id, protected)
+      not Gate.installable?(manifest, opts[:app_version]) -> {:ok, :below_min_version}
+      Watchdog.rejected?(opts[:watchdog], id, manifest) -> {:ok, :rejected}
+      Watchdog.superseded?(opts[:watchdog], manifest) -> stale_for_build(id)
+      not Watchdog.ready_to_install?(opts[:watchdog]) -> {:ok, :deferred}
+      true -> install(id, body, manifest, expected, opts)
     end
   end
 

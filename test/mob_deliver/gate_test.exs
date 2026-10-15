@@ -81,6 +81,33 @@ defmodule MobDeliver.GateTest do
     assert {:required, _} = status(ctx, "1.0", @late)
   end
 
+  test "of two manifests with the same issued_at, the first verified stays, across a restart",
+       ctx do
+    issued_at = "2026-09-20T00:00:00Z"
+
+    {first, manifest} =
+      published(ctx, %{
+        "issued_at" => issued_at,
+        "min_app_version" => "1.4.0",
+        "force_update_after" => @deadline
+      })
+
+    :ok = Gate.record(ctx.gate, first, manifest)
+    record(ctx, %{"issued_at" => issued_at, "min_app_version" => nil})
+
+    assert {:required, _} = status(ctx, "1.0", @late)
+    assert {id, _} = Gate.newest(ctx.gate)
+    assert id == Store.manifest_id(first)
+
+    restarted = :"#{ctx.gate}_tie"
+
+    start_supervised!({Gate, name: restarted, store: ctx.store, verify: ctx.verify},
+      id: restarted
+    )
+
+    assert {^id, _} = Gate.newest(restarted)
+  end
+
   test "a restarted gate reloads the persisted one, re-verified", ctx do
     record(ctx, %{"min_app_version" => "1.4.0", "force_update_after" => @deadline})
 

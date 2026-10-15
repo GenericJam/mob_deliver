@@ -14,7 +14,12 @@ defmodule MobDeliver.Gate do
   or not — a manifest the app is too old for is never installed, but its
   floor must still apply. It's persisted as the signed body and
   re-verified at boot, so it holds offline, and an older signed manifest
-  (lower `issued_at`) can't replace a newer one to lift the gate.
+  (lower `issued_at`) can't replace a newer one to lift the gate. Of two
+  different manifests with the same `issued_at`, the first verified stays.
+
+  The same record is the replay floor for installs and JIT refreshes
+  (`newest/1`): nothing older than it is used. See
+  `decisions/2026-10-15-replay-floor.md`.
 
   The app's own version is `config :mob_deliver, :app_version` if set,
   else the native store version from `Mob.Device.app_version()`. If it —
@@ -60,7 +65,7 @@ defmodule MobDeliver.Gate do
   @spec status(GenServer.server(), keyword()) :: status()
   def status(server \\ __MODULE__, opts \\ []) do
     case :ets.lookup(table(server), :latest) do
-      [{:latest, manifest}] ->
+      [{:latest, _id, manifest}] ->
         evaluate(
           manifest,
           Keyword.get_lazy(opts, :app_version, &Config.app_version/0),
@@ -69,6 +74,18 @@ defmodule MobDeliver.Gate do
 
       [] ->
         :ok
+    end
+  end
+
+  @doc """
+  The newest manifest this device has verified, with its content id, or
+  `nil` before the first (or when the persisted one didn't re-verify).
+  """
+  @spec newest(GenServer.server()) :: {Store.manifest_id(), Manifest.t()} | nil
+  def newest(server \\ __MODULE__) do
+    case :ets.lookup(table(server), :latest) do
+      [{:latest, id, manifest}] -> {id, manifest}
+      [] -> nil
     end
   end
 
@@ -84,10 +101,11 @@ defmodule MobDeliver.Gate do
   end
 
   @doc """
-  Records a freshly verified manifest (body + parse) if it's at least as
-  new as the current one. It governs the gate from now on even if
-  persisting it fails (then `{:error, _}` is returned and the next launch
-  falls back to the last persisted one).
+  Records a freshly verified manifest (body + parse) if it's newer than the
+  current one (a later `issued_at`; at an equal `issued_at` the current one
+  stays). It governs the gate from now on even if persisting it fails (then
+  `{:error, _}` is returned and the next launch falls back to the last
+  persisted one).
   """
   @spec record(GenServer.server(), binary(), Manifest.t()) :: :ok | {:error, term()}
   def record(server \\ __MODULE__, body, %Manifest{} = manifest),
@@ -176,7 +194,7 @@ defmodule MobDeliver.Gate do
   defp load(s, verify) do
     with {:ok, body} <- Disk.read(path(s)),
          {:ok, manifest} <- verify.(body) do
-      :ets.insert(s.table, {:latest, manifest})
+      :ets.insert(s.table, {:latest, Store.manifest_id(body), manifest})
       warn_uncomparable(manifest, s.app_version)
     else
       {:error, :missing} ->
@@ -192,21 +210,29 @@ defmodule MobDeliver.Gate do
 
   @impl true
   def handle_call({:record, body, manifest}, _from, s) do
-    current =
-      case :ets.lookup(s.table, :latest) do
-        [{:latest, current}] -> current
-        [] -> nil
-      end
+    id = Store.manifest_id(body)
 
-    if current == nil or DateTime.compare(manifest.issued_at, current.issued_at) != :lt do
-      # A verified floor applies at once, persisted or not.
-      :ets.insert(s.table, {:latest, manifest})
-      warn_uncomparable(manifest, s.app_version)
-      report_change(s, current, manifest)
-      {:reply, Disk.atomic_write(path(s), body), s}
-    else
-      {:reply, :ok, s}
+    case :ets.lookup(s.table, :latest) do
+      [{:latest, current_id, current}] ->
+        case DateTime.compare(manifest.issued_at, current.issued_at) do
+          :gt -> {:reply, replace(s, current, id, body, manifest), s}
+          # The same manifest again: persisting it again retries a write that failed.
+          :eq when id == current_id -> {:reply, Disk.atomic_write(path(s), body), s}
+          # Older, or another manifest with the same issued_at: the newest stays.
+          _ -> {:reply, :ok, s}
+        end
+
+      [] ->
+        {:reply, replace(s, nil, id, body, manifest), s}
     end
+  end
+
+  # A verified floor applies at once, persisted or not.
+  defp replace(s, current, id, body, manifest) do
+    :ets.insert(s.table, {:latest, id, manifest})
+    warn_uncomparable(manifest, s.app_version)
+    report_change(s, current, manifest)
+    Disk.atomic_write(path(s), body)
   end
 
   # Into or out of :required (recommended counts as open: nothing blocks).

@@ -125,6 +125,16 @@ defmodule MobDeliver do
       before this build, or from an older checkout); not installed.
     * `{:error, :not_configured}` — `:endpoint`, `:app` or `:channel` is
       unset on this device (logged).
+    * `{:error, {:downgrade, info}}` — the server's manifest isn't newer
+      than the newest one this device has verified (installed or not):
+      an older `issued_at`, or another manifest with the same `issued_at`.
+      Every signed manifest stays valid, so this is how a replayed old
+      publish — from the server or anyone between it and the device — is
+      refused. Nothing is downloaded or installed; logged as an error.
+      `info` has the refused manifest's `:id` and `:issued_at` and the
+      newest one's (`:newest_id`, `:newest_issued_at`). The same
+      manifest fetched again is never refused. Publish again (a new
+      `issued_at`) to ship older code on purpose.
     * `{:error, reason}` — fetch, verification, or prefetch failed; nothing
       changed. Network and TLS failures are `{:transport, _}`.
     * `{:error, :not_running}` — mob_deliver's processes aren't running
@@ -215,7 +225,9 @@ defmodule MobDeliver do
       its closure from there. The manifest itself isn't installed; that
       stays the update check's job. Before the first frame nothing is
       fetched this way (it has no probation record, so it mustn't be able
-      to fail a launch): `{:error, :not_found}`.
+      to fail a launch): `{:error, :not_found}`. A server manifest older
+      than the newest this device has verified isn't used:
+      `{:error, {:downgrade, info}}` (as for `check/0`).
     * Otherwise → `Code.ensure_loaded/1` (bundled code), or
       `{:error, :not_found}`.
     * Past the forced-update deadline → `{:error, :update_required}`,
