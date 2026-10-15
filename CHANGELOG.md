@@ -6,7 +6,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ---
 
-## [Unreleased]
+## [0.3.3] - 2026-10-15
 
 ### Fixed
 - **`resolve/1` says the plugin is disabled instead of blaming the
