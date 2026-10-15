@@ -161,7 +161,8 @@ case MobDeliver.update_status() do
 end
 
 # For an "app version" / diagnostics row: the active manifest (id,
-# issued_at), the last check's result and time, the gate, the notice.
+# issued_at), the last check's result and time, the gate, the notice,
+# and why updates are disabled, if boot disabled them (e.g. a bad key).
 MobDeliver.state()
 ```
 

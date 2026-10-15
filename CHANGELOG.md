@@ -6,6 +6,23 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ---
 
+## [Unreleased]
+
+### Fixed
+- **`resolve/1` says the plugin is disabled instead of blaming the
+  manifest** (MOB-364). When boot disabled the plugin (malformed
+  `trusted_publish_key`, missing settings), resolving a module that isn't
+  on the device logged "isn't in the installed manifest; not asking the
+  server before the first screen has rendered" and returned
+  `{:error, :not_found}`, even after the first screen. It now logs that
+  updates are disabled and why, and returns
+  `{:error, {:disabled, reason}}` (`:invalid_trusted_publish_key` or
+  `{:not_configured, keys}`).
+
+### Added
+- `MobDeliver.state/0` has a `:disabled` field: why boot disabled the
+  plugin, or `nil`.
+
 ## [0.3.2] - 2026-10-09
 
 ### Added

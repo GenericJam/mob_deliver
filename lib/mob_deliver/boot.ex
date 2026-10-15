@@ -7,7 +7,7 @@ defmodule MobDeliver.Boot do
 
   require Logger
 
-  alias MobDeliver.{Build, Bundled, Config, Loader, Manifest, Poller, Store, Watchdog}
+  alias MobDeliver.{Build, Bundled, Config, Loader, Manifest, Poller, Status, Store, Watchdog}
 
   @load_timeout 5_000
 
@@ -15,8 +15,10 @@ defmodule MobDeliver.Boot do
   def run(opts \\ []) do
     store = Keyword.get(opts, :store, Store)
     watchdog = Keyword.get(opts, :watchdog, Watchdog)
+    readiness = decide(store, opts)
+    Status.put_readiness(store, readiness)
 
-    case readiness(store, opts) do
+    case readiness do
       :ok ->
         # Anything that fails after Store.boot/2 has published the active
         # manifest must unpublish it: delivered code never runs unprobated.
@@ -26,44 +28,68 @@ defmodule MobDeliver.Boot do
 
         guarded("update services", fn -> start_services(opts) end, fn -> :ok end)
 
-      {:skip, why} ->
+      {:disabled, reason} ->
         # Nothing is touched: the stored manifests, probation state and
         # rejections stay as they are for a boot that can use them.
-        Logger.warning("mob_deliver: #{why}; running bundled code, no update checks")
+        Logger.warning("mob_deliver: #{describe(reason)}; running bundled code, no update checks")
     end
 
     :ok
   end
+
+  # Boot's own reasons: the public ones, plus its processes not running
+  # (then nothing can be recorded or asked, and `MobDeliver` reports
+  # `running: false` / `{:error, :not_running}` instead).
+  @typep reason :: MobDeliver.disabled_reason() | :not_running
+
+  @doc """
+  What the last `run/1` for `store` decided: `:ok`, `{:disabled, reason}`
+  (it skipped everything, see `t:MobDeliver.disabled_reason/0`), or
+  `:not_booted` before it ran in this application's lifetime.
+  """
+  @spec readiness(Store.server()) :: :ok | {:disabled, reason()} | :not_booted
+  def readiness(store \\ Store), do: Status.readiness(store)
 
   # Without its processes (the OTP application not started: mob < 0.9.6
   # doesn't start plugin applications) every call would exit, and the
   # router hook would refuse all navigation. Without app/channel, or with
   # a key that can't be decoded, the verifier would reject — and discard —
   # every stored manifest.
-  defp readiness(store, opts) do
+  defp decide(store, opts) do
     configured? = not Keyword.has_key?(opts, :verify)
     missing = if configured?, do: Config.missing(), else: []
 
     cond do
       GenServer.whereis(store) == nil ->
-        {:skip,
-         "the :mob_deliver application isn't running (mob >= 0.9.6 starts plugin applications before their on_start)"}
+        {:disabled, :not_running}
 
       missing != [] ->
-        {:skip,
-         "not configured (#{Enum.map_join(missing, ", ", &inspect/1)} unset in config :mob_deliver, " <>
-           "or the app config didn't reach the device: that needs mob >= 0.9.6 and its mob_dev)"}
+        {:disabled, {:not_configured, missing}}
 
       configured? and not Manifest.valid_key?(Config.trusted_publish_key()) ->
-        {:skip,
-         "config :mob_deliver, :trusted_publish_key isn't a valid key " <>
-           "(expected \"ed25519:\" <> base64 of the 32-byte public key, as printed by " <>
-           "mix mob_deliver.gen.key); fix it and rebuild"}
+        {:disabled, :invalid_trusted_publish_key}
 
       true ->
         :ok
     end
   end
+
+  @doc "Says what a disabled reason means and what to do about it."
+  @spec describe(reason()) :: String.t()
+  def describe(:not_running),
+    do:
+      "the :mob_deliver application isn't running (mob >= 0.9.6 starts plugin applications before their on_start)"
+
+  def describe({:not_configured, missing}),
+    do:
+      "not configured (#{Enum.map_join(missing, ", ", &inspect/1)} unset in config :mob_deliver, " <>
+        "or the app config didn't reach the device: that needs mob >= 0.9.6 and its mob_dev)"
+
+  def describe(:invalid_trusted_publish_key),
+    do:
+      "config :mob_deliver, :trusted_publish_key isn't a valid key " <>
+        "(expected \"ed25519:\" <> base64 of the 32-byte public key, as printed by " <>
+        "mix mob_deliver.gen.key); fix it and rebuild"
 
   @doc "Verifies a stored or fetched manifest body against this build's key, app, and channel."
   @spec verifier() :: Store.verify_fun()

@@ -6,6 +6,7 @@ defmodule MobDeliver.Resolver do
   require Logger
 
   alias MobDeliver.{
+    Boot,
     Build,
     Config,
     Fetcher,
@@ -74,7 +75,9 @@ defmodule MobDeliver.Resolver do
   # install (or nothing is installed yet): look at the server's newest
   # manifest (rate-limited, see MobDeliver.Refresh) and, if that delivers
   # it, take this module's closure from there — without installing it.
-  # Route atoms are the router's business and never trigger a fetch.
+  # Route atoms are the router's business and never trigger a fetch. If
+  # boot disabled the plugin, nothing is installed and nothing may be
+  # fetched: that, not the manifest, is why such a module isn't delivered.
   defp manifest_for(module, opts) do
     key = Manifest.module_key(module)
 
@@ -83,24 +86,34 @@ defmodule MobDeliver.Resolver do
         found
 
       _absent_or_none ->
-        cond do
-          :code.which(module) != :non_existing or route?(module) ->
-            :bundled
+        if :code.which(module) != :non_existing or route?(module),
+          do: :bundled,
+          else: undelivered(module, key, Boot.readiness(opts[:store]), opts)
+    end
+  end
 
-          # Code that isn't installed has no probation record, so it must not
-          # be able to take down a launch: nothing from a refresh runs before
-          # the root screen's first frame (see the ADR).
-          not Watchdog.first_idle?(opts[:watchdog]) ->
-            Logger.info(
-              "mob_deliver: #{inspect(module)} isn't in the installed manifest; " <>
-                "not asking the server before the first screen has rendered"
-            )
+  defp undelivered(module, _key, {:disabled, reason}, _opts) do
+    Logger.warning(
+      "mob_deliver: #{inspect(module)} can't be delivered: updates are disabled " <>
+        "(#{inspect(reason)}: #{Boot.describe(reason)})"
+    )
 
-            :bundled
+    {:error, {:disabled, reason}}
+  end
 
-          true ->
-            refreshed(module, key, opts)
-        end
+  # Code that isn't installed has no probation record, so it must not be
+  # able to take down a launch: nothing from a refresh runs before the root
+  # screen's first frame (see the ADR).
+  defp undelivered(module, key, _ok_or_not_booted, opts) do
+    if Watchdog.first_idle?(opts[:watchdog]) do
+      refreshed(module, key, opts)
+    else
+      Logger.info(
+        "mob_deliver: #{inspect(module)} isn't in the installed manifest; " <>
+          "not asking the server before the first screen has rendered"
+      )
+
+      :bundled
     end
   end
 

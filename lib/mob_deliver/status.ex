@@ -1,9 +1,10 @@
 defmodule MobDeliver.Status do
   @moduledoc false
   # What `MobDeliver.state/0` reports that no other process keeps: the last
-  # update check's result and when it finished. A public ETS table owned by
+  # update check's result and when it finished, and what boot decided for
+  # each store (`MobDeliver.Boot.readiness/1`). A public ETS table owned by
   # this process, so recording never goes through a process and reading
-  # works from anywhere.
+  # works from anywhere; it starts empty with the application.
 
   use GenServer
 
@@ -30,6 +31,26 @@ defmodule MobDeliver.Status do
     end
   rescue
     ArgumentError -> nil
+  end
+
+  @doc "Records boot's decision for `store`. Never raises (a no-op while mob_deliver isn't running)."
+  @spec put_readiness(GenServer.server(), term()) :: :ok
+  def put_readiness(store, readiness) do
+    :ets.insert(@table, {{:readiness, store}, readiness})
+    :ok
+  rescue
+    ArgumentError -> :ok
+  end
+
+  @doc "Boot's decision for `store`, or `:not_booted`."
+  @spec readiness(GenServer.server()) :: term()
+  def readiness(store) do
+    case :ets.lookup(@table, {:readiness, store}) do
+      [{_, readiness}] -> readiness
+      [] -> :not_booted
+    end
+  rescue
+    ArgumentError -> :not_booted
   end
 
   @impl true

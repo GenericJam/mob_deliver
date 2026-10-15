@@ -204,6 +204,9 @@ defmodule MobDeliver do
       checks it against the manifest SHA and that it defines `module`,
       then loads it — together with every delivered module it calls that
       isn't loaded yet, so the whole call closure is present.
+    * Boot disabled the plugin (see `state/0`'s `:disabled`) and `module`
+      is in neither the binary nor a route → `{:error, {:disabled, reason}}`:
+      nothing is installed or fetched, and the warning logged says why.
     * In neither the active manifest nor the app binary (e.g. published
       after the last install), once the root screen has rendered → asks
       the server for its newest manifest — at most once per
@@ -300,9 +303,13 @@ defmodule MobDeliver do
   @spec update_status() :: MobDeliver.Gate.status()
   def update_status, do: running(&MobDeliver.Gate.status/0, :ok)
 
+  @typedoc "Why boot disabled the plugin; see `state/0`."
+  @type disabled_reason :: {:not_configured, [atom()]} | :invalid_trusted_publish_key
+
   @typedoc "See `state/0`."
   @type state :: %{
           running: boolean(),
+          disabled: disabled_reason() | nil,
           active: %{id: String.t(), issued_at: DateTime.t()} | nil,
           last_check: %{result: term(), at: DateTime.t()} | nil,
           update_status: MobDeliver.Gate.status(),
@@ -315,6 +322,10 @@ defmodule MobDeliver do
   raises; while mob_deliver isn't running (host tests, early boot) it
   reports `running: false` and empty values.
 
+    * `:disabled` — why boot disabled the plugin, or `nil` if it didn't
+      (or hasn't run): `:invalid_trusted_publish_key` or
+      `{:not_configured, missing_keys}`. The app then runs its bundled
+      code and nothing is checked or delivered.
     * `:active` — the active manifest's id and `issued_at`, or `nil` when
       the app runs its bundled code.
     * `:last_check` — the last `check/0`'s result (by the poller, a push,
@@ -329,12 +340,20 @@ defmodule MobDeliver do
   def state do
     %{
       running: running?(),
+      disabled: disabled(),
       active: running(&active/0, nil),
       last_check: MobDeliver.Status.last_check(),
       update_status: update_status(),
       restart_required: restart_required?(),
       rollback_notice: rollback_notice()
     }
+  end
+
+  defp disabled do
+    case MobDeliver.Boot.readiness() do
+      {:disabled, reason} -> reason
+      _ok_or_not_booted -> nil
+    end
   end
 
   defp active do
