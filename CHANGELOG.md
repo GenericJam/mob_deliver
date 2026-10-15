@@ -6,7 +6,7 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ---
 
-## [Unreleased]
+## [0.4.0] - 2026-10-15
 
 ### Security
 - **An older signed manifest is no longer installed** (MOB-382). Every
@@ -41,9 +41,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 - A manifest published with a future `issued_at` (wrong clock) holds
   devices above later publishes until that time passes. To ship before
   then, publish with an explicit `issued_at` after it
-  (`MobDeliverServer.build/2`'s `:issued_at`), and keep doing so for every
-  publish until the bad time has passed: a normal publish stamps the
-  current time and is refused until then.
+  (`MobDeliverServer.build/2`'s `:issued_at`), and give every publish
+  until the bad time has passed an explicit `issued_at` later than the
+  previous publish's: a normal publish stamps the current time, and a
+  reused `issued_at` is a different manifest at the same time; both are
+  refused.
 
 ## [0.3.3] - 2026-10-15
 

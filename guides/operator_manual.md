@@ -203,9 +203,11 @@ signed publish to bring back code you've since fixed. So:
 * A publish dated in the future (a machine with a wrong clock) holds every
   device that fetches it above all later publishes until that time
   passes. To ship before then, publish with an `issued_at` after it
-  (`MobDeliverServer.build/2` takes `:issued_at`), and do so for every
-  publish until the bad time has passed: a normal publish stamps the
-  current time and is refused until then.
+  (`MobDeliverServer.build/2` takes `:issued_at`), and give every publish
+  until the bad time has passed an explicit `issued_at` later than the
+  previous publish's: a normal publish stamps the current time, and a
+  reused `issued_at` is a different manifest at the same time; both are
+  refused.
 
 ## 5. Update window
 
