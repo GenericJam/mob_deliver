@@ -160,12 +160,34 @@ defmodule MobDeliver.ConfigTest do
       end)
 
     assert log =~ "trusted_publish_key"
-    assert log =~ "isn't a valid"
+    assert Boot.readiness(booted) == {:disabled, :invalid_trusted_publish_key}
 
     # With the key fixed, the stored manifest is still there.
     configure(key)
     again = :"cfg_store_again_#{n}"
     start_supervised!({Store, name: again, root: root}, id: again)
     assert {:ok, %Manifest{}} = Store.boot(again, verify)
+  end
+
+  test "after a malformed-key boot, resolve reports the disabled plugin and why", %{tmp_dir: root} do
+    n = System.unique_integer([:positive])
+    store = :"cfg_store_resolve_#{n}"
+    watchdog = :"cfg_wd_resolve_#{n}"
+    start_supervised!({Store, name: store, root: root}, id: store)
+    start_supervised!({Watchdog, name: watchdog, store: store}, id: watchdog)
+
+    configure("ed25519:not-a-key")
+    assert Boot.run(store: store, watchdog: watchdog, poller: nil) == :ok
+
+    missing = :"Elixir.MobDeliverConfig.Nowhere#{n}"
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert MobDeliver.Resolver.resolve(missing, store: store, watchdog: watchdog) ==
+                 {:error, {:disabled, :invalid_trusted_publish_key}}
+      end)
+
+    assert log =~ inspect(missing)
+    assert log =~ inspect(:invalid_trusted_publish_key)
   end
 end

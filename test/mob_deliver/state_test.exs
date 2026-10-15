@@ -99,6 +99,20 @@ defmodule MobDeliver.StateTest do
     assert MobDeliver.check(details: true) == {:ok, :current, %{restart_required: true}}
   end
 
+  test "state/0 says why boot disabled the plugin, until the application restarts" do
+    fresh_app()
+    on_exit(&fresh_app/0)
+    configure("ed25519:not-a-key", fn conn -> Plug.Conn.send_resp(conn, 500, "") end)
+    on_exit(&unconfigure/0)
+
+    assert MobDeliver.state().disabled == nil
+    assert MobDeliver.on_start() == :ok
+    assert MobDeliver.state().disabled == :invalid_trusted_publish_key
+
+    fresh_app()
+    assert MobDeliver.state().disabled == nil
+  end
+
   defp compile(source) do
     {[{module, binary}], _} =
       Code.with_diagnostics([log: false], fn -> Code.compile_string(source) end)
