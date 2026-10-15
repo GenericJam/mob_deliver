@@ -65,8 +65,8 @@ older than the newest manifest it has verified.
   its own.
 * **Two publishes in the same second conflict.** `mob_deliver_server`'s
   publish task stamps `issued_at` to the second. A device that saw one
-  refuses the other. Follow-up for mob_deliver_server: make a publish's
-  `issued_at` later than the manifest it replaces.
+  refuses the other. Follow-up for mob_deliver_server (MOB-486): make a
+  publish's `issued_at` later than the manifest it replaces.
 * **A future-dated publish pins the floor.** A manifest signed on a
   machine whose clock is ahead holds every device that fetched it above
   later publishes until that time. Recovery: publish with an explicit
