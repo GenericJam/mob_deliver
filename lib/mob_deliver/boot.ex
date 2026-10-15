@@ -37,13 +37,17 @@ defmodule MobDeliver.Boot do
     :ok
   end
 
+  # Boot's own reasons: the public ones, plus its processes not running
+  # (then nothing can be recorded or asked, and `MobDeliver` reports
+  # `running: false` / `{:error, :not_running}` instead).
+  @typep reason :: MobDeliver.disabled_reason() | :not_running
+
   @doc """
   What the last `run/1` for `store` decided: `:ok`, `{:disabled, reason}`
   (it skipped everything, see `t:MobDeliver.disabled_reason/0`), or
   `:not_booted` before it ran in this application's lifetime.
   """
-  @spec readiness(Store.server()) ::
-          :ok | {:disabled, MobDeliver.disabled_reason()} | :not_booted
+  @spec readiness(Store.server()) :: :ok | {:disabled, reason()} | :not_booted
   def readiness(store \\ Store), do: Status.readiness(store)
 
   # Without its processes (the OTP application not started: mob < 0.9.6
@@ -70,8 +74,8 @@ defmodule MobDeliver.Boot do
     end
   end
 
-  @doc "Says what a `t:MobDeliver.disabled_reason/0` means and what to do about it."
-  @spec describe(MobDeliver.disabled_reason()) :: String.t()
+  @doc "Says what a disabled reason means and what to do about it."
+  @spec describe(reason()) :: String.t()
   def describe(:not_running),
     do:
       "the :mob_deliver application isn't running (mob >= 0.9.6 starts plugin applications before their on_start)"

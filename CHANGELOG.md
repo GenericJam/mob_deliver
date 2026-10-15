@@ -16,8 +16,8 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
   server before the first screen has rendered" and returned
   `{:error, :not_found}`, even after the first screen. It now logs that
   updates are disabled and why, and returns
-  `{:error, {:disabled, reason}}` (`:invalid_trusted_publish_key`,
-  `{:not_configured, keys}`, or `:not_running`).
+  `{:error, {:disabled, reason}}` (`:invalid_trusted_publish_key` or
+  `{:not_configured, keys}`).
 
 ### Added
 - `MobDeliver.state/0` has a `:disabled` field: why boot disabled the

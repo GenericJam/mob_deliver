@@ -204,6 +204,9 @@ defmodule MobDeliver do
       checks it against the manifest SHA and that it defines `module`,
       then loads it — together with every delivered module it calls that
       isn't loaded yet, so the whole call closure is present.
+    * Boot disabled the plugin (see `state/0`'s `:disabled`) and `module`
+      is in neither the binary nor a route → `{:error, {:disabled, reason}}`:
+      nothing is installed or fetched, and the warning logged says why.
     * In neither the active manifest nor the app binary (e.g. published
       after the last install), once the root screen has rendered → asks
       the server for its newest manifest — at most once per
@@ -214,9 +217,7 @@ defmodule MobDeliver do
       fetched this way (it has no probation record, so it mustn't be able
       to fail a launch): `{:error, :not_found}`.
     * Otherwise → `Code.ensure_loaded/1` (bundled code), or
-      `{:error, :not_found}` — or `{:error, {:disabled, reason}}` if boot
-      disabled the plugin (see `state/0`'s `:disabled`): then nothing is
-      installed or fetched, and the warning logged says why.
+      `{:error, :not_found}`.
     * Past the forced-update deadline → `{:error, :update_required}`,
       including when the refreshed manifest is what moved the deadline.
 
@@ -303,8 +304,7 @@ defmodule MobDeliver do
   def update_status, do: running(&MobDeliver.Gate.status/0, :ok)
 
   @typedoc "Why boot disabled the plugin; see `state/0`."
-  @type disabled_reason ::
-          :not_running | {:not_configured, [atom()]} | :invalid_trusted_publish_key
+  @type disabled_reason :: {:not_configured, [atom()]} | :invalid_trusted_publish_key
 
   @typedoc "See `state/0`."
   @type state :: %{
@@ -323,9 +323,9 @@ defmodule MobDeliver do
   reports `running: false` and empty values.
 
     * `:disabled` — why boot disabled the plugin, or `nil` if it didn't
-      (or hasn't run): `:invalid_trusted_publish_key`,
-      `{:not_configured, missing_keys}` or `:not_running`. The app then
-      runs its bundled code and nothing is checked or delivered.
+      (or hasn't run): `:invalid_trusted_publish_key` or
+      `{:not_configured, missing_keys}`. The app then runs its bundled
+      code and nothing is checked or delivered.
     * `:active` — the active manifest's id and `issued_at`, or `nil` when
       the app runs its bundled code.
     * `:last_check` — the last `check/0`'s result (by the poller, a push,
