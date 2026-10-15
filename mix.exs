@@ -51,6 +51,7 @@ defmodule MobDeliver.MixProject do
         "guides/operator_manual.md",
         "guides/store_review.md",
         "decisions/2026-09-19-scope-and-wire-format.md",
+        "decisions/2026-10-15-replay-floor.md",
         "CHANGELOG.md",
         "LICENSE"
       ]

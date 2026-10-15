@@ -68,10 +68,12 @@ defmodule MobDeliver.ResolverTest do
     {module, binary}
   end
 
+  # A new publish each call (later issued_at), unless `extra` pins one.
   defp signed(ctx, modules, extra \\ %{}) do
     %{
       "modules" =>
-        Map.new(modules, fn {mod, bin} -> {Manifest.module_key(mod), "sha256:" <> sha(bin)} end)
+        Map.new(modules, fn {mod, bin} -> {Manifest.module_key(mod), "sha256:" <> sha(bin)} end),
+      "issued_at" => TestPublisher.next_issued_at()
     }
     |> Map.merge(extra)
     |> TestPublisher.fields()
@@ -441,6 +443,21 @@ defmodule MobDeliver.ResolverTest do
       publish_latest(ctx, [{mod, bin}], %{"min_app_version" => "3.0"})
 
       assert Resolver.resolve(mod, opts) == {:error, :not_found}
+      refute :code.is_loaded(mod)
+    end
+
+    test "the server's manifest isn't used if it's older than the newest this device has verified",
+         ctx do
+      {mod, bin} = beam("defmodule MobDeliverJit#{ctx.id}.Replayed do def hi, do: :old end")
+      # Nothing installed; every miss asks the server again.
+      opts = Keyword.put(serving(ctx, %{sha(bin) => bin}), :refresh_interval, 0)
+
+      publish_latest(ctx, [], %{"issued_at" => "2026-10-02T00:00:00Z"})
+      assert Resolver.resolve(mod, opts) == {:error, :not_found}
+
+      # The server (or someone between) now answers with an older manifest.
+      publish_latest(ctx, [{mod, bin}], %{"issued_at" => "2026-10-01T00:00:00Z"})
+      assert {:error, {:downgrade, _}} = Resolver.resolve(mod, opts)
       refute :code.is_loaded(mod)
     end
 

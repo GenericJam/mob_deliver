@@ -38,8 +38,12 @@ defmodule MobDeliver.InstallerTest do
 
   defp sha(bin), do: Base.encode16(:crypto.hash(:sha256, bin), case: :lower)
 
+  # A new publish each call (later issued_at), unless `extra` pins one.
   defp body(ctx, modules, private \\ nil, extra \\ %{}) do
-    %{"modules" => Map.new(modules, fn {key, bin} -> {key, "sha256:" <> sha(bin)} end)}
+    %{
+      "modules" => Map.new(modules, fn {key, bin} -> {key, "sha256:" <> sha(bin)} end),
+      "issued_at" => TestPublisher.next_issued_at()
+    }
     |> Map.merge(extra)
     |> TestPublisher.fields()
     |> TestPublisher.sign(private || ctx.private)
@@ -391,5 +395,155 @@ defmodule MobDeliver.InstallerTest do
 
     assert Installer.check(opts(ctx, update, %{sha("bytes") => "bytes"})) == {:ok, :installed}
     assert_raise ArgumentError, fn -> String.to_existing_atom("Elixir." <> unheard_of) end
+  end
+
+  describe "replay floor: nothing older than the newest manifest this device has verified" do
+    # A launch in a fresh VM over the same root: store, gate and watchdog
+    # reload what they persisted.
+    defp restart(ctx) do
+      n = System.unique_integer([:positive])
+      store = :"inst_store_r#{n}"
+      gate = :"inst_gate_r#{n}"
+      watchdog = :"inst_wd_r#{n}"
+      start_supervised!({Store, name: store, root: ctx.root}, id: store)
+      {:ok, _} = Store.boot(store, ctx.verify)
+      start_supervised!({Gate, name: gate, store: store, verify: ctx.verify}, id: gate)
+
+      start_supervised!({Watchdog, name: watchdog, store: store, app_version: "2.0.0"},
+        id: watchdog
+      )
+
+      %{ctx | store: store, gate: gate, watchdog: watchdog}
+    end
+
+    defp at(ctx, modules, issued_at), do: body(ctx, modules, nil, %{"issued_at" => issued_at})
+
+    # A launch that reaches first idle: the installed update is proven.
+    defp proven(ctx) do
+      {watchdog, {:ok, _}} = launch(ctx, %{})
+      :ok = Watchdog.mark_stable(watchdog)
+      %{ctx | watchdog: watchdog}
+    end
+
+    test "an older signed manifest replayed after a newer install is refused, across a restart",
+         ctx do
+      blobs = Map.new(["home 1", "home 2"], &{sha(&1), &1})
+      old = at(ctx, [{"MyApp.Home", "home 1"}], "2026-10-01T00:00:00Z")
+      new = at(ctx, [{"MyApp.Home", "home 2"}], "2026-10-02T00:00:00Z")
+
+      # First install: nothing verified before, so no floor.
+      assert Installer.check(opts(ctx, old, blobs)) == {:ok, :installed}
+      ctx = proven(ctx)
+      assert Installer.check(opts(ctx, new, blobs)) == {:ok, :installed}
+
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert {:error, {:downgrade, info}} = Installer.check(opts(ctx, old, blobs))
+
+          assert info == %{
+                   id: Store.manifest_id(old),
+                   issued_at: ~U[2026-10-01 00:00:00Z],
+                   newest_id: Store.manifest_id(new),
+                   newest_issued_at: ~U[2026-10-02 00:00:00Z]
+                 }
+        end)
+
+      assert log =~ Store.manifest_id(old)
+      assert Store.active_id(ctx.store) == Store.manifest_id(new)
+
+      relaunched = ctx |> restart() |> proven()
+      assert Store.active_id(relaunched.store) == Store.manifest_id(new)
+      assert {:error, {:downgrade, _}} = Installer.check(opts(relaunched, old, blobs))
+      assert Store.active_id(relaunched.store) == Store.manifest_id(new)
+
+      newer = at(ctx, [{"MyApp.Home", "home 1"}], "2026-10-03T00:00:00Z")
+      assert Installer.check(opts(relaunched, newer, blobs)) == {:ok, :installed}
+    end
+
+    test "the same manifest fetched again is no error; another with the same issued_at is refused",
+         ctx do
+      blobs = Map.new(["home 1", "home 2"], &{sha(&1), &1})
+      installed = at(ctx, [{"MyApp.Home", "home 1"}], "2026-10-01T00:00:00Z")
+      twin = at(ctx, [{"MyApp.Home", "home 2"}], "2026-10-01T00:00:00Z")
+
+      assert Installer.check(opts(ctx, installed, blobs)) == {:ok, :installed}
+      assert Installer.check(opts(ctx, installed, blobs)) == {:ok, :current}
+      assert {:error, {:downgrade, _}} = Installer.check(opts(ctx, twin, blobs))
+      assert Store.active_id(ctx.store) == Store.manifest_id(installed)
+
+      # Across a restart too.
+      relaunched = restart(ctx)
+      assert Installer.check(opts(relaunched, installed, blobs)) == {:ok, :current}
+      assert {:error, {:downgrade, _}} = Installer.check(opts(relaunched, twin, blobs))
+    end
+
+    test "a newer manifest that was verified but not installed raises the floor, with or without an active slot",
+         ctx do
+      blobs = Map.new(["home 1", "home 2", "home 9"], &{sha(&1), &1})
+
+      # Nothing installed; the server's newest is for a later app version.
+      too_new =
+        body(ctx, [{"MyApp.Home", "home 9"}], nil, %{
+          "issued_at" => "2026-10-05T00:00:00Z",
+          "min_app_version" => "9.0"
+        })
+
+      assert Installer.check(opts(ctx, too_new, blobs)) == {:ok, :below_min_version}
+      assert Store.active_id(ctx.store) == nil
+
+      # Fetched again: the same manifest, not a downgrade.
+      assert Installer.check(opts(ctx, too_new, blobs)) == {:ok, :below_min_version}
+
+      older = at(ctx, [{"MyApp.Home", "home 1"}], "2026-10-04T00:00:00Z")
+      assert {:error, {:downgrade, _}} = Installer.check(opts(ctx, older, blobs))
+      assert Store.active_id(ctx.store) == nil
+
+      # With an active slot older than both, the gate's record still decides.
+      activate!(ctx, at(ctx, [{"MyApp.Home", "home 1"}], "2026-10-01T00:00:00Z"))
+      between = at(ctx, [{"MyApp.Home", "home 2"}], "2026-10-03T00:00:00Z")
+      assert {:error, {:downgrade, _}} = Installer.check(opts(restart(ctx), between, blobs))
+    end
+
+    test "the active manifest is a floor even if the gate's record is lost", ctx do
+      blobs = Map.new(["home 1", "home 2"], &{sha(&1), &1})
+      new = at(ctx, [{"MyApp.Home", "home 2"}], "2026-10-02T00:00:00Z")
+      assert Installer.check(opts(ctx, new, blobs)) == {:ok, :installed}
+
+      File.rm!(Path.join(ctx.root, "gate.json"))
+      relaunched = restart(ctx)
+      assert Gate.newest(relaunched.gate) == nil
+
+      old = at(ctx, [{"MyApp.Home", "home 1"}], "2026-10-01T00:00:00Z")
+      assert {:error, {:downgrade, _}} = Installer.check(opts(relaunched, old, blobs))
+    end
+
+    test "a watchdog rollback still reinstates the previous manifest, and doesn't lower the floor",
+         ctx do
+      blobs = Map.new(["good", "bad", "between", "fixed"], &{sha(&1), &1})
+      good = at(ctx, [{"MyApp.Home", "good"}], "2026-10-01T00:00:00Z")
+      bad = at(ctx, [{"MyApp.Home", "bad"}], "2026-10-03T00:00:00Z")
+
+      assert Installer.check(opts(ctx, good, blobs)) == {:ok, :installed}
+      {stable, {:ok, :armed}} = launch(ctx, %{"MyApp.Home" => sha("good")})
+      :ok = Watchdog.mark_stable(stable)
+
+      assert Installer.check(opts(ctx, bad, blobs, watchdog: stable)) == {:ok, :installed}
+
+      # The probation launch dies before first idle; the next rolls back.
+      {_, {:ok, :armed}} = launch(ctx, %{"MyApp.Home" => sha("bad")})
+      {rolled, {:ok, :rolled_back}} = launch(ctx, %{})
+      assert Store.active_id(ctx.store) == Store.manifest_id(good)
+
+      # The rolled-back-to manifest is current, not a downgrade.
+      assert Installer.check(opts(ctx, good, blobs, watchdog: rolled)) == {:ok, :current}
+
+      # Older than the rolled-back update: still refused, across a restart.
+      between = at(ctx, [{"MyApp.Home", "between"}], "2026-10-02T00:00:00Z")
+      relaunched = restart(ctx)
+      assert {:error, {:downgrade, _}} = Installer.check(opts(relaunched, between, blobs))
+
+      fixed = at(ctx, [{"MyApp.Home", "fixed"}], "2026-10-04T00:00:00Z")
+      assert Installer.check(opts(relaunched, fixed, blobs)) == {:ok, :installed}
+    end
   end
 end

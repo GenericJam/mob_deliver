@@ -70,8 +70,12 @@ defmodule MobDeliver.BuildChangeTest do
 
   defp sha(bin), do: Base.encode16(:crypto.hash(:sha256, bin), case: :lower)
 
+  # A new publish each call (later issued_at), unless `extra` pins one.
   defp publish(ctx, delivered, extra \\ %{}) do
-    %{"modules" => %{Manifest.module_key(ctx.module) => "sha256:" <> sha(delivered)}}
+    %{
+      "modules" => %{Manifest.module_key(ctx.module) => "sha256:" <> sha(delivered)},
+      "issued_at" => TestPublisher.next_issued_at()
+    }
     |> Map.merge(extra)
     |> TestPublisher.fields()
     |> TestPublisher.sign(ctx.private)
@@ -386,7 +390,11 @@ defmodule MobDeliver.BuildChangeTest do
     assert running(ctx) == :bundled_v2
 
     assert check(ctx, new_build, b, %{sha(b_bytes) => b_bytes}) == {:ok, :stale_for_build}
-    assert check(ctx, new_build, a, %{sha(a_bytes) => a_bytes}) == {:ok, :stale_for_build}
+    # A replayed is older than B: refused before the build is considered.
+    # Re-published as is (newer), it's outgrown like B.
+    assert {:error, {:downgrade, _}} = check(ctx, new_build, a, %{sha(a_bytes) => a_bytes})
+    a_again = publish(ctx, a_bytes, %{"issued_at" => "2026-10-03T00:00:00Z"})
+    assert check(ctx, new_build, a_again, %{sha(a_bytes) => a_bytes}) == {:ok, :stale_for_build}
   end
 
   test "a manifest whose delivered blob was lost when the build outgrew it isn't reinstalled over the new build",

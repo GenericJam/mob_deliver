@@ -9,13 +9,15 @@ defmodule MobDeliver.Refresh do
   # offline device can't turn navigation into a request storm.
   #
   # Nothing is installed here: the result only tells the resolver where to
-  # fetch one screen's modules from (see the ADR's "JIT navigation").
+  # fetch one screen's modules from (see the ADR's "JIT navigation"). A
+  # manifest older than the newest this device has verified isn't used
+  # (MobDeliver.Floor): `{:error, {:downgrade, _}}`.
 
   use GenServer
 
   require Logger
 
-  alias MobDeliver.{Client, Gate, Manifest, SingleFlight, Store}
+  alias MobDeliver.{Client, Floor, Gate, Manifest, SingleFlight, Store}
 
   @type result :: {:ok, Store.manifest_id(), Manifest.t()} | {:error, term()}
 
@@ -30,7 +32,7 @@ defmodule MobDeliver.Refresh do
   The latest manifest from the server — `{:fresh, result}` — or the result
   of a fetch less than `opts[:refresh_interval]` ms old —
   `{:cached, age_ms, result}`. Uses `opts[:refresh]`, `:single_flight`,
-  `:gate` and `:client_opts`. `{:error, _}` if the shared fetch itself
+  `:gate`, `:store` and `:client_opts`. `{:error, _}` if the shared fetch itself
   failed to run (`MobDeliver.SingleFlight`).
   """
   @spec latest(keyword()) ::
@@ -65,7 +67,8 @@ defmodule MobDeliver.Refresh do
           )
         end
 
-        {:ok, Store.manifest_id(body), manifest}
+        id = Store.manifest_id(body)
+        with :ok <- Floor.check(id, manifest, opts), do: {:ok, id, manifest}
       end
 
     GenServer.call(opts[:refresh], {:put, result})

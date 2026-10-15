@@ -6,6 +6,42 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ---
 
+## [Unreleased]
+
+### Security
+- **An older signed manifest is no longer installed** (MOB-382). Every
+  signed manifest stays valid forever, and `check/0` installed any of them
+  that wasn't active, rolled back, outgrown or protected, so whoever
+  answers `POST /manifest` — a compromised update server, or a
+  man-in-the-middle on a plain-HTTP endpoint — could replay an old publish
+  and bring back code a later one fixed. A device now refuses any manifest
+  older than the newest it has verified (installed or not; the update
+  gate's persisted, re-verified record, with the active manifest as a
+  second floor), and so does `resolve/1`'s refresh of the server's
+  manifest. Refused: `{:error, {:downgrade, %{id:, issued_at:, newest_id:,
+  newest_issued_at:}}}`, logged as an error; nothing is downloaded. The
+  same manifest fetched again is never refused. A watchdog rollback still
+  reinstates the previous manifest and doesn't lower the floor. See
+  `decisions/2026-10-15-replay-floor.md`.
+
+### Changed
+- Of two different manifests with the same `issued_at`, the update gate
+  now keeps the first one verified (it took the later one), and the
+  second is refused as above.
+
+### Added
+- `MobDeliver.Gate.newest/1`: the newest verified manifest and its id.
+
+### Upgrading
+- To back out a bad update, **publish again** (a new `issued_at`):
+  putting the old manifest file back on the server only reaches devices
+  that never fetched the newer one.
+- Don't publish twice within the same second (the publish task's
+  `issued_at` resolution); a device that saw one refuses the other.
+- A manifest published with a future `issued_at` (wrong clock) holds
+  devices above later publishes until then; recover by publishing with a
+  later explicit `issued_at` (`MobDeliverServer.build/2`'s `:issued_at`).
+
 ## [0.3.3] - 2026-10-15
 
 ### Fixed
