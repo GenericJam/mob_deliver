@@ -202,8 +202,10 @@ signed publish to bring back code you've since fixed. So:
   one first. Don't publish twice within a second.
 * A publish dated in the future (a machine with a wrong clock) holds every
   device that fetches it above all later publishes until that time
-  passes; publish with an `issued_at` after it to recover
-  (`MobDeliverServer.build/2` takes `:issued_at`).
+  passes. To ship before then, publish with an `issued_at` after it
+  (`MobDeliverServer.build/2` takes `:issued_at`), and do so for every
+  publish until the bad time has passed: a normal publish stamps the
+  current time and is refused until then.
 
 ## 5. Update window
 

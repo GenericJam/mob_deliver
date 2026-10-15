@@ -13,7 +13,10 @@ defmodule MobDeliver.Floor do
   # unverifiable gate file still can't take the device below what it runs.
   # A watchdog rollback moves the active slot back but never the gate's
   # record, so it doesn't lower the mark; and since it reinstates a slot
-  # rather than installing, it isn't checked here.
+  # rather than installing, it isn't checked here. The active manifest
+  # itself always passes: the device already runs it, so after a rollback
+  # the server serving it again is neither installed (`:current`) nor
+  # reported as a replay by the JIT refresh.
   #
   # Equal issued_at: the same manifest (same content id) passes, so a
   # re-fetch is a no-op for the caller to recognise; a different manifest
@@ -38,11 +41,17 @@ defmodule MobDeliver.Floor do
   @spec check(Store.manifest_id(), Manifest.t(), keyword()) ::
           :ok | {:error, {:downgrade, downgrade()}}
   def check(id, %Manifest{} = manifest, opts) do
-    [Gate.newest(opts[:gate]), Store.active(opts[:store])]
-    |> Enum.find(&below?(id, manifest, &1))
-    |> case do
-      nil -> :ok
-      {newest_id, newest} -> refuse(id, manifest, newest_id, newest)
+    case Store.active(opts[:store]) do
+      {^id, _active} ->
+        :ok
+
+      active ->
+        [Gate.newest(opts[:gate]), active]
+        |> Enum.find(&below?(id, manifest, &1))
+        |> case do
+          nil -> :ok
+          {newest_id, newest} -> refuse(id, manifest, newest_id, newest)
+        end
     end
   end
 

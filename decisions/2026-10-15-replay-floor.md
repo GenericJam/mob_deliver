@@ -36,8 +36,9 @@ older than the newest manifest it has verified.
 * **Order.** `check/0` records the fetched manifest with the gate first,
   then checks the floor. A newer manifest becomes the mark before its
   install is attempted, so a newer manifest that isn't installed
-  (`:below_min_version`, `:rejected`, `:deferred`, `:stale_for_build`, a
-  failed prefetch) still holds the floor above everything older.
+  (`:below_min_version`, `:rejected`, `:deferred`, `:stale_for_build`,
+  `{:error, {:protected_modules, _}}`, a failed prefetch) still holds the
+  floor above everything older.
 * **Equal `issued_at`.** The same manifest (same content id) fetched again
   is never refused: `{:ok, :current}` when active, otherwise whatever the
   normal pre-checks say. A *different* manifest with the same `issued_at`
@@ -47,8 +48,9 @@ older than the newest manifest it has verified.
 * **Rollback.** The watchdog's rollback reinstates the previous slot; it
   doesn't install, so the floor doesn't apply to it, and it never touches
   the gate's record, so it doesn't lower the mark. After rolling back from
-  B to A, anything older than B is still refused; A itself is active and
-  `:current`.
+  B to A, anything older than B is still refused. The active manifest
+  always passes the floor: A served again is `:current` for `check/0` and
+  usable by the JIT refresh, not reported as a replay.
 * **Refusal.** `{:error, {:downgrade, %{id, issued_at, newest_id,
   newest_issued_at}}}` from `check/0` and from `resolve/1`'s refresh,
   plus a `Logger.error` naming both manifests. Nothing is downloaded.
@@ -68,9 +70,13 @@ older than the newest manifest it has verified.
 * **A future-dated publish pins the floor.** A manifest signed on a
   machine whose clock is ahead holds every device that fetched it above
   later publishes until that time. Recovery: publish with an explicit
-  later `issued_at` (`MobDeliverServer.build/2` takes `:issued_at`). The
-  device can't tell a skewed clock from a real later publish, and its own
-  clock isn't trustworthy either, so no cap is applied.
+  later `issued_at` (`MobDeliverServer.build/2` takes `:issued_at`). That
+  publish is in the future too, so every publish until the bad time has
+  passed needs an explicit `issued_at` after the previous one; the
+  mob_deliver_server follow-up above (an `issued_at` later than the
+  manifest it replaces) removes the need. The device can't tell a skewed
+  clock from a real later publish, and its own clock isn't trustworthy
+  either, so no cap is applied.
 * **What it doesn't stop.** A device that has never seen the newer
   manifest can still be served an older one: first contact, a fresh
   install, or an attacker who controls every response since the newer

@@ -89,7 +89,7 @@ defmodule MobDeliver.ResolverTest do
     body
   end
 
-  # Publishes a manifest and installs it on the device.
+  # Publishes a manifest and installs it on the device; returns its body.
   defp activate_manifest(ctx, modules) do
     body = publish_latest(ctx, modules)
 
@@ -97,6 +97,7 @@ defmodule MobDeliver.ResolverTest do
       Manifest.verify(body, ctx.key, app: "com.example.app", channel: "production")
 
     :ok = Store.activate(ctx.store, body, manifest, Store.active_id(ctx.store))
+    body
   end
 
   # Resolver options whose server answers POST /manifest with the latest
@@ -459,6 +460,22 @@ defmodule MobDeliver.ResolverTest do
       publish_latest(ctx, [{mod, bin}], %{"issued_at" => "2026-10-01T00:00:00Z"})
       assert {:error, {:downgrade, _}} = Resolver.resolve(mod, opts)
       refute :code.is_loaded(mod)
+    end
+
+    test "the manifest this device runs is used even if a newer one was verified (rolled back)",
+         ctx do
+      {mod, bin} = beam("defmodule MobDeliverJit#{ctx.id}.Missing do def hi, do: :hi end")
+      opts = Keyword.put(serving(ctx, %{sha(bin) => bin}), :refresh_interval, 0)
+      active = activate_manifest(ctx, [])
+
+      # A newer manifest is verified (the floor rises) but not used, as
+      # after a watchdog rollback from it.
+      publish_latest(ctx, [{mod, bin}], %{"min_app_version" => "3.0"})
+      assert Resolver.resolve(mod, opts) == {:error, :not_found}
+
+      # The server answers with the active manifest again: not a replay.
+      Agent.update(ctx.latest, fn _ -> active end)
+      assert Resolver.resolve(mod, opts) == {:error, :not_found}
     end
 
     test "the server's manifest isn't used if this device rolled its modules back", ctx do

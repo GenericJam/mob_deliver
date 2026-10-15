@@ -20,9 +20,9 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
   second floor), and so does `resolve/1`'s refresh of the server's
   manifest. Refused: `{:error, {:downgrade, %{id:, issued_at:, newest_id:,
   newest_issued_at:}}}`, logged as an error; nothing is downloaded. The
-  same manifest fetched again is never refused. A watchdog rollback still
-  reinstates the previous manifest and doesn't lower the floor. See
-  `decisions/2026-10-15-replay-floor.md`.
+  same manifest fetched again is never refused, nor is the one the device
+  runs. A watchdog rollback still reinstates the previous manifest and
+  doesn't lower the floor. See `decisions/2026-10-15-replay-floor.md`.
 
 ### Changed
 - Of two different manifests with the same `issued_at`, the update gate
@@ -39,8 +39,11 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 - Don't publish twice within the same second (the publish task's
   `issued_at` resolution); a device that saw one refuses the other.
 - A manifest published with a future `issued_at` (wrong clock) holds
-  devices above later publishes until then; recover by publishing with a
-  later explicit `issued_at` (`MobDeliverServer.build/2`'s `:issued_at`).
+  devices above later publishes until that time passes. To ship before
+  then, publish with an explicit `issued_at` after it
+  (`MobDeliverServer.build/2`'s `:issued_at`), and keep doing so for every
+  publish until the bad time has passed: a normal publish stamps the
+  current time and is refused until then.
 
 ## [0.3.3] - 2026-10-15
 
