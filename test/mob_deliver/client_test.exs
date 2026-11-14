@@ -175,4 +175,16 @@ defmodule MobDeliver.ClientTest do
       assert Client.fetch_manifest(opts) == {:error, {:http_status, 404}}
     end
   end
+
+  test "an unknown endpoint_type is an error, without a request", %{opts: opts} do
+    Req.Test.stub(Client, fn conn ->
+      send(self(), :requested)
+      Plug.Conn.send_resp(conn, 500, "")
+    end)
+
+    assert Client.fetch_manifest(Keyword.put(opts, :endpoint_type, "static")) ==
+             {:error, {:invalid_endpoint_type, "static"}}
+
+    refute_received :requested
+  end
 end

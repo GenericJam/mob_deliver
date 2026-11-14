@@ -80,7 +80,9 @@ static host look routine.
   blobs and manifest together; a Pages deploy switches the whole site at
   once.
 * Two publishes must not share an `issued_at` second and a publish must be
-  later than the one it replaces (the replay floor ADR's follow-up;
-  `mob_deliver_server` now dates a publish after the manifest it replaces).
+  later than the one it replaces (the replay floor ADR's follow-up,
+  MOB-486: `mob_deliver_server` after 0.2.0 dates a publish after the
+  manifest it replaces, GenericJam/mob_deliver_server#2; 0.2.0 stamps the
+  current second).
 * JIT refresh (`resolve/1` of a screen the active manifest doesn't have)
   reads the same file and is refused the same way when it's stale.

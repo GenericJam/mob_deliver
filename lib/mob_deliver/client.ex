@@ -39,6 +39,7 @@ defmodule MobDeliver.Client do
   @type error ::
           :no_trusted_publish_key
           | :not_configured
+          | {:invalid_endpoint_type, term()}
           | {:http_status, pos_integer()}
           | {:transport, Exception.t() | {:exit, term()}}
           | Manifest.error()
@@ -103,7 +104,8 @@ defmodule MobDeliver.Client do
     app = Keyword.fetch!(opts, :app)
     channel = opts |> Keyword.fetch!(:channel) |> to_string()
 
-    with {:ok, body} <- request(opts, manifest_request(opts, app, channel)),
+    with {:ok, request_opts} <- manifest_request(opts, app, channel),
+         {:ok, body} <- request(opts, request_opts),
          {:ok, manifest} <- Manifest.verify(body, trusted_key, app: app, channel: channel) do
       {:ok, manifest, body}
     end
@@ -112,22 +114,28 @@ defmodule MobDeliver.Client do
   defp manifest_request(opts, app, channel) do
     case Keyword.get(opts, :endpoint_type, :server) do
       :server ->
-        [
-          method: :post,
-          url: url(opts, "/manifest"),
-          headers: [accept: @accept, content_type: "application/json"],
-          body: JSON.encode!(%{"app" => app, "channel" => channel})
-        ]
+        {:ok,
+         [
+           method: :post,
+           url: url(opts, "/manifest"),
+           headers: [accept: @accept, content_type: "application/json"],
+           body: JSON.encode!(%{"app" => app, "channel" => channel})
+         ]}
 
       # mob_deliver_server's publish layout (Storage.FS): manifests/<app>/<channel>.json.
       # no-cache asks caches on the way to revalidate; a CDN may ignore it,
       # which is what the replay floor is for.
       :static ->
-        [
-          method: :get,
-          url: url(opts, "/manifests/#{segment(app)}/#{segment(channel)}.json"),
-          headers: [accept: @accept, cache_control: "no-cache"]
-        ]
+        {:ok,
+         [
+           method: :get,
+           url: url(opts, "/manifests/#{segment(app)}/#{segment(channel)}.json"),
+           headers: [accept: @accept, cache_control: "no-cache"]
+         ]}
+
+      # Boot disables the plugin for this; the public API still answers, without a request.
+      other ->
+        {:error, {:invalid_endpoint_type, other}}
     end
   end
 
