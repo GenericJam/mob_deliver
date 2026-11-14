@@ -165,7 +165,8 @@ git -C ../site add -A ota && git -C ../site commit -m "OTA publish" && git -C ..
   that has already seen the newer manifest refuses it as a downgrade
   (logged; nothing downloaded) and installs the newer one at a later
   check; one that hasn't simply sees no update yet. Add the host's deploy
-  time (about a minute for Pages).
+  time (GitHub documents up to ten minutes for a Pages publish to go live;
+  watch the branch's deployment in the repository's Actions tab).
 * Commit blobs and manifest together; a Pages deploy switches the site at
   once. For a host that uploads file by file, upload `beam/` first.
 
@@ -383,6 +384,7 @@ nothing changed:
 | `{:ok, :stale_for_build}` | the manifest ships module versions this device's build has newer bundled code for (section 4); publish from the build's source |
 | `{:error, {:protected_modules, keys}}` | the manifest would replace mob_deliver's, mob's or the app config's own code (or Elixir/crypto); never installed — remove those modules from what you publish |
 | `{:error, {:downgrade, info}}` | the server's manifest is older than (or a different one with the same `issued_at` as) the newest this device has verified — `info.newest_id`/`newest_issued_at` (section 4, "Only a newer publish installs"); on a static host shortly after a publish, a cached copy: wait out the cache (section 3); otherwise publish again |
+| `{:error, {:floor_not_persisted, reason}}` | the device couldn't write its record of the newest manifest it has verified (the replay floor, `<data dir>/mob_deliver/gate/`): storage full or read-only. Nothing is installed or downloaded until it can; the next check retries |
 
 A navigation that does nothing logs `mob_deliver: navigation to X refused,
 it couldn't be delivered (reason)` (the same reasons as above). A module
