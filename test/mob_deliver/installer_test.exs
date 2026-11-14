@@ -504,17 +504,163 @@ defmodule MobDeliver.InstallerTest do
       assert {:error, {:downgrade, _}} = Installer.check(opts(restart(ctx), between, blobs))
     end
 
-    test "the active manifest is a floor even if the gate's record is lost", ctx do
+    # The files holding this app/channel's gate record (the two copies, or
+    # the single gate.json older versions wrote), primary last.
+    defp gate_records(ctx) do
+      dir = Path.join(ctx.root, "gate")
+
+      copies =
+        case File.ls(dir) do
+          {:ok, names} -> for name <- Enum.sort(names), do: Path.join(dir, name)
+          {:error, _} -> []
+        end
+
+      copies ++ Enum.filter([Path.join(ctx.root, "gate.json")], &File.exists?/1)
+    end
+
+    defp damage!(ctx, :lost), do: File.rm!(List.last(gate_records(ctx)))
+    defp damage!(ctx, :corrupt), do: File.write!(hd(gate_records(ctx)), "{\"manifest_vers")
+
+    defp damage!(ctx, :tampered) do
+      path = hd(gate_records(ctx))
+      File.write!(path, String.replace(File.read!(path), "MyApp.Home", "MyApp.Evil"))
+    end
+
+    defp flush_fetched do
+      receive do
+        {:fetched, _} -> flush_fetched()
+      after
+        0 -> :ok
+      end
+    end
+
+    for damage <- [:lost, :corrupt, :tampered],
+        unused <- [:prefetch_failed, :below_min_version, :deferred] do
+      @tag damage: damage, unused: unused
+      test "a newer manifest verified but not installed (#{unused}) holds the floor across a " <>
+             "restart when a copy of the gate's record is #{damage}",
+           ctx do
+        # "home 3" isn't served: the newer manifest's prefetch fails.
+        blobs = Map.new(["home 1", "home 2"], &{sha(&1), &1})
+        a = at(ctx, [{"MyApp.Home", "home 1"}], "2026-10-01T00:00:00Z")
+        assert Installer.check(opts(ctx, a, blobs)) == {:ok, :installed}
+        # Proven, unless the newer one is to be deferred behind its probation.
+        ctx = if ctx.unused == :deferred, do: ctx, else: proven(ctx)
+
+        extra = if ctx.unused == :below_min_version, do: %{"min_app_version" => "9.0"}, else: %{}
+
+        b =
+          body(
+            ctx,
+            [{"MyApp.Home", "home 3"}],
+            nil,
+            Map.put(extra, "issued_at", "2026-10-03T00:00:00Z")
+          )
+
+        case Installer.check(opts(ctx, b, blobs)) do
+          {:error, {:prefetch_failed, _, _}} -> assert ctx.unused == :prefetch_failed
+          {:ok, outcome} -> assert outcome == ctx.unused
+        end
+
+        assert Store.active_id(ctx.store) == Store.manifest_id(a)
+
+        damage!(ctx, ctx.damage)
+        relaunched = restart(ctx)
+
+        # An older publish than the newest verified one, newer than the active one.
+        c = at(ctx, [{"MyApp.Home", "home 2"}], "2026-10-02T00:00:00Z")
+
+        assert {:error, {:downgrade, %{newest_id: newest}}} =
+                 Installer.check(opts(relaunched, c, blobs))
+
+        assert newest == Store.manifest_id(b)
+        assert Store.active_id(relaunched.store) == Store.manifest_id(a)
+
+        # The damaged copy was rewritten.
+        assert [_, _] = copies = gate_records(relaunched) -- [Path.join(ctx.root, "gate.json")]
+        for path <- copies, do: assert(Store.manifest_id(File.read!(path)) == newest)
+      end
+    end
+
+    test "a newer manifest whose record can't be persisted isn't used; the write is retried and holds across a restart",
+         ctx do
+      blobs = Map.new(["home 1", "home 2", "home 3"], &{sha(&1), &1})
+      a = at(ctx, [{"MyApp.Home", "home 1"}], "2026-10-01T00:00:00Z")
+      assert Installer.check(opts(ctx, a, blobs)) == {:ok, :installed}
+      ctx = proven(ctx)
+      flush_fetched()
+
+      dir = Path.join(ctx.root, "gate")
+      assert File.dir?(dir)
+      File.chmod!(dir, 0o500)
+      on_exit(fn -> File.chmod(dir, 0o700) end)
+
+      b = at(ctx, [{"MyApp.Home", "home 3"}], "2026-10-03T00:00:00Z")
+      assert {:error, {:floor_not_persisted, _}} = Installer.check(opts(ctx, b, blobs))
+      assert Store.active_id(ctx.store) == Store.manifest_id(a)
+      refute_received {:fetched, _}
+
+      # While the write keeps failing, nothing is used.
+      c = at(ctx, [{"MyApp.Home", "home 2"}], "2026-10-02T00:00:00Z")
+      assert {:error, {:floor_not_persisted, _}} = Installer.check(opts(ctx, c, blobs))
+
+      # Once it succeeds (retried by the next check), the older one is refused,
+      # in this session and after a restart.
+      File.chmod!(dir, 0o700)
+      assert {:error, {:downgrade, %{newest_id: newest}}} = Installer.check(opts(ctx, c, blobs))
+      assert newest == Store.manifest_id(b)
+      assert {:error, {:downgrade, _}} = Installer.check(opts(restart(ctx), c, blobs))
+    end
+
+    test "the store's slots are a floor if both copies of the gate's record are lost", ctx do
       blobs = Map.new(["home 1", "home 2"], &{sha(&1), &1})
       new = at(ctx, [{"MyApp.Home", "home 2"}], "2026-10-02T00:00:00Z")
       assert Installer.check(opts(ctx, new, blobs)) == {:ok, :installed}
 
-      File.rm!(Path.join(ctx.root, "gate.json"))
+      File.rm_rf!(Path.join(ctx.root, "gate"))
       relaunched = restart(ctx)
-      assert Gate.newest(relaunched.gate) == nil
+      assert {id, _} = Gate.newest(relaunched.gate)
+      assert id == Store.manifest_id(new)
+      # Both copies rewritten from the slot.
+      assert [_, _] = copies = gate_records(relaunched)
+      for path <- copies, do: assert(Store.manifest_id(File.read!(path)) == id)
 
       old = at(ctx, [{"MyApp.Home", "home 1"}], "2026-10-01T00:00:00Z")
       assert {:error, {:downgrade, _}} = Installer.check(opts(relaunched, old, blobs))
+    end
+
+    test "switching channel and back keeps each channel's floor", ctx do
+      blobs = Map.new(["home 1", "home 2", "beta"], &{sha(&1), &1})
+      p1 = at(ctx, [{"MyApp.Home", "home 1"}], "2026-10-01T00:00:00Z")
+      p2 = at(ctx, [{"MyApp.Home", "home 2"}], "2026-10-02T00:00:00Z")
+      assert Installer.check(opts(ctx, p2, blobs)) == {:ok, :installed}
+      ctx = proven(ctx)
+
+      # A build on beta: the production slots don't verify and are dropped.
+      beta_verify = &Manifest.verify(&1, ctx.key, app: "com.example.app", channel: "beta")
+      beta = %{ctx | verify: beta_verify} |> restart() |> proven()
+      assert Store.active_id(beta.store) == nil
+
+      b1 =
+        body(ctx, [{"MyApp.Home", "beta"}], nil, %{
+          "issued_at" => "2026-10-05T00:00:00Z",
+          "channel" => "beta"
+        })
+
+      beta_opts =
+        opts(beta, b1, blobs)
+        |> Keyword.update!(:client_opts, &Keyword.put(&1, :channel, "beta"))
+
+      assert Installer.check(beta_opts) == {:ok, :installed}
+
+      # Back on production: p1 is older than p2, which this device verified there.
+      production = restart(%{beta | verify: ctx.verify})
+      assert Store.active_id(production.store) == nil
+
+      assert {:error, {:downgrade, %{newest_id: newest}}} =
+               Installer.check(opts(production, p1, blobs))
+
+      assert newest == Store.manifest_id(p2)
     end
 
     test "a watchdog rollback still reinstates the previous manifest, and doesn't lower the floor",

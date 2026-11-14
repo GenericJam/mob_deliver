@@ -441,11 +441,8 @@ defmodule MobDeliver.ResolverTest do
     test "the server's manifest isn't used if this app version is below its floor", ctx do
       {mod, bin} = beam("defmodule MobDeliverJit#{ctx.id}.TooNew do def hi, do: :new end")
       opts = publish(ctx, [], %{sha(bin) => bin})
-      # Below the floor but before its deadline (past it, the gate is required).
-      publish_latest(ctx, [{mod, bin}], %{
-        "min_app_version" => "3.0",
-        "force_update_after" => "2099-01-01T00:00:00Z"
-      })
+      # Below the floor, no deadline: recommended, never required.
+      publish_latest(ctx, [{mod, bin}], %{"min_app_version" => "3.0", "force_update_after" => nil})
 
       assert Resolver.resolve(mod, opts) == {:error, :not_found}
       refute :code.is_loaded(mod)
@@ -466,6 +463,52 @@ defmodule MobDeliver.ResolverTest do
       refute :code.is_loaded(mod)
     end
 
+    test "a newer manifest verified but not used holds the refresh's floor across a restart " <>
+           "with a copy of the gate's record lost",
+         ctx do
+      {mod, bin} = beam("defmodule MobDeliverJit#{ctx.id}.Stale do def hi, do: :old end")
+      opts = Keyword.put(serving(ctx, %{sha(bin) => bin}), :refresh_interval, 0)
+
+      # Verified, never used: this app version is below its floor.
+      publish_latest(ctx, [], %{
+        "issued_at" => "2026-10-03T00:00:00Z",
+        "min_app_version" => "3.0",
+        "force_update_after" => nil
+      })
+
+      assert Resolver.resolve(mod, opts) == {:error, :not_found}
+
+      # One copy of the record lost (the single gate.json, before copies).
+      dir = Path.join(ctx.root, "gate")
+      copies = if File.dir?(dir), do: Enum.map(File.ls!(dir), &Path.join(dir, &1)), else: []
+      File.rm!(List.last(Enum.sort(copies)) || Path.join(ctx.root, "gate.json"))
+      gate = :"#{ctx.gate}_relaunched"
+      verify = &Manifest.verify(&1, ctx.key, app: "com.example.app", channel: "production")
+      start_supervised!({Gate, name: gate, store: ctx.store, verify: verify}, id: gate)
+
+      publish_latest(ctx, [{mod, bin}], %{"issued_at" => "2026-10-02T00:00:00Z"})
+      assert {:error, {:downgrade, _}} = Resolver.resolve(mod, Keyword.put(opts, :gate, gate))
+      refute :code.is_loaded(mod)
+    end
+
+    test "the server's manifest isn't used while the gate can't persist it", ctx do
+      {mod, bin} = beam("defmodule MobDeliverJit#{ctx.id}.Unsaved do def hi, do: :hi end")
+      opts = Keyword.put(serving(ctx, %{sha(bin) => bin}), :refresh_interval, 0)
+      publish_latest(ctx, [], %{"issued_at" => "2026-10-01T00:00:00Z"})
+      assert Resolver.resolve(mod, opts) == {:error, :not_found}
+
+      dir = Path.join(ctx.root, "gate")
+      File.chmod!(dir, 0o500)
+      on_exit(fn -> File.chmod(dir, 0o700) end)
+
+      publish_latest(ctx, [{mod, bin}], %{"issued_at" => "2026-10-02T00:00:00Z"})
+      assert {:error, {:floor_not_persisted, _}} = Resolver.resolve(mod, opts)
+      refute :code.is_loaded(mod)
+
+      File.chmod!(dir, 0o700)
+      assert Resolver.resolve(mod, opts) == :ok
+    end
+
     test "the manifest this device runs is used even if a newer one was verified (rolled back)",
          ctx do
       {mod, bin} = beam("defmodule MobDeliverJit#{ctx.id}.Missing do def hi, do: :hi end")
@@ -474,10 +517,7 @@ defmodule MobDeliver.ResolverTest do
 
       # A newer manifest is verified (the floor rises) but not used, as
       # after a watchdog rollback from it.
-      publish_latest(ctx, [{mod, bin}], %{
-        "min_app_version" => "3.0",
-        "force_update_after" => "2099-01-01T00:00:00Z"
-      })
+      publish_latest(ctx, [{mod, bin}], %{"min_app_version" => "3.0", "force_update_after" => nil})
 
       assert Resolver.resolve(mod, opts) == {:error, :not_found}
 

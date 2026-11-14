@@ -120,30 +120,85 @@ defmodule MobDeliver.GateTest do
     assert {:required, _} = Gate.status(restarted, app_version: "1.0", now: @late)
   end
 
-  test "a tampered gate file is ignored on start", ctx do
-    record(ctx, %{"min_app_version" => "1.4.0", "force_update_after" => @deadline})
-    path = Path.join(ctx.root, "gate.json")
-    File.write!(path, String.replace(File.read!(path), "1.4.0", "9.9.9"))
-
-    restarted = :"#{ctx.gate}_tampered"
+  defp restart(ctx, suffix) do
+    restarted = :"#{ctx.gate}_#{suffix}"
 
     start_supervised!({Gate, name: restarted, store: ctx.store, verify: ctx.verify},
       id: restarted
     )
 
-    assert Gate.status(restarted, app_version: "1.0", now: @late) == :ok
+    restarted
   end
 
-  test "a verified floor applies at once even if it can't be persisted", ctx do
+  defp copies(ctx) do
+    dir = Path.join(ctx.root, "gate")
+    for name <- Enum.sort(File.ls!(dir)), do: Path.join(dir, name)
+  end
+
+  defp tamper!(path), do: File.write!(path, String.replace(File.read!(path), "1.4.0", "9.9.9"))
+
+  test "a tampered copy of the gate's record is skipped on start and rewritten from the other",
+       ctx do
+    record(ctx, %{"min_app_version" => "1.4.0", "force_update_after" => @deadline})
+    [tampered, intact] = copies(ctx)
+    tamper!(tampered)
+
+    restarted = restart(ctx, "one_tampered")
+
+    assert {:required, %{min_app_version: "1.4.0"}} =
+             Gate.status(restarted, app_version: "1.0", now: @late)
+
+    assert File.read!(tampered) == File.read!(intact)
+  end
+
+  test "with both copies tampered and nothing in the store, the gate is open", ctx do
+    record(ctx, %{"min_app_version" => "1.4.0", "force_update_after" => @deadline})
+    Enum.each(copies(ctx), &tamper!/1)
+
+    restarted = restart(ctx, "both_tampered")
+    assert Gate.status(restarted, app_version: "1.0", now: @late) == :ok
+    assert Gate.newest(restarted) == nil
+  end
+
+  test "the single gate.json older versions wrote is still the record, now kept in copies", ctx do
+    {body, _manifest} =
+      published(ctx, %{"min_app_version" => "1.4.0", "force_update_after" => @deadline})
+
+    File.write!(Path.join(ctx.root, "gate.json"), body)
+
+    restarted = restart(ctx, "legacy")
+    assert {:required, _} = Gate.status(restarted, app_version: "1.0", now: @late)
+    assert [_, _] = copies = copies(ctx)
+    for path <- copies, do: assert(File.read!(path) == body)
+  end
+
+  test "a verified floor applies at once even if it can't be persisted, and the write is retried",
+       ctx do
     File.mkdir_p!(ctx.root)
     File.chmod!(ctx.root, 0o500)
     on_exit(fn -> File.chmod(ctx.root, 0o700) end)
 
     {body, manifest} =
-      published(ctx, %{"min_app_version" => "1.4.0", "force_update_after" => @deadline})
+      published(ctx, %{
+        "issued_at" => "2026-09-20T00:00:00Z",
+        "min_app_version" => "1.4.0",
+        "force_update_after" => @deadline
+      })
 
     assert {:error, _} = Gate.record(ctx.gate, body, manifest)
     assert {:required, _} = status(ctx, "1.0", @late)
+
+    # An older manifest doesn't replace it, but its write is retried, and
+    # reported, until it succeeds.
+    {older, older_manifest} =
+      published(ctx, %{"issued_at" => "2026-09-10T00:00:00Z", "min_app_version" => nil})
+
+    assert {:error, _} = Gate.record(ctx.gate, older, older_manifest)
+    File.chmod!(ctx.root, 0o700)
+    assert :ok = Gate.record(ctx.gate, older, older_manifest)
+
+    assert {:required, _} =
+             Gate.status(restart(ctx, "retried"), app_version: "1.0", now: @late)
   end
 
   test "a recorded manifest that changes this app's verdict is reported at once; one that doesn't isn't",

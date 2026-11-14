@@ -15,9 +15,7 @@ defmodule MobDeliver.Refresh do
 
   use GenServer
 
-  require Logger
-
-  alias MobDeliver.{Client, Floor, Gate, Manifest, SingleFlight, Store}
+  alias MobDeliver.{Client, Floor, Manifest, SingleFlight, Store}
 
   @type result :: {:ok, Store.manifest_id(), Manifest.t()} | {:error, term()}
 
@@ -58,15 +56,11 @@ defmodule MobDeliver.Refresh do
   end
 
   defp fetch(opts) do
+    # Like any verified manifest, it governs the update gate, and it isn't
+    # used unless that record is durable (MobDeliver.Floor).
     result =
-      with {:ok, manifest, body} <- Client.fetch_manifest(opts[:client_opts]) do
-        # Like any verified manifest, it governs the update gate.
-        with {:error, reason} <- Gate.record(opts[:gate], body, manifest) do
-          Logger.warning(
-            "mob_deliver: could not record update-gate manifest (#{inspect(reason)})"
-          )
-        end
-
+      with {:ok, manifest, body} <- Client.fetch_manifest(opts[:client_opts]),
+           :ok <- Floor.record(opts[:gate], body, manifest) do
         id = Store.manifest_id(body)
         with :ok <- Floor.check(id, manifest, opts), do: {:ok, id, manifest}
       end

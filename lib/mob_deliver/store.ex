@@ -197,7 +197,8 @@ defmodule MobDeliver.Store do
   @doc """
   Deletes blobs referenced by neither the active nor the previous manifest
   (previous stays: it's the rollback target), plus temp files left by
-  interrupted writes. Deletes nothing if either slot can't be parsed.
+  interrupted writes (the store's and the update gate's). Deletes nothing
+  if either slot can't be parsed.
 
   Boot-only: blob writes don't go through this process, so it must run
   when nothing can be fetching — the plugin's boot calls it before update
@@ -205,6 +206,24 @@ defmodule MobDeliver.Store do
   """
   @spec gc(server()) :: {:ok, non_neg_integer()} | {:error, term()}
   def gc(server), do: GenServer.call(server, :gc)
+
+  @doc """
+  The signed manifest bodies in the persisted state (active and previous),
+  read from disk and not verified: the update gate recovers the replay
+  floor from them when its own record is lost (`MobDeliver.Gate`). `[]` if
+  the state is missing or unreadable (`boot/2` reports that). No process hop:
+  the gate reads them while starting, before the store has booted.
+  """
+  @spec persisted_bodies(server()) :: [binary()]
+  def persisted_bodies(server) do
+    case Disk.read_term(state_path(server)) do
+      {:ok, %{active: active, previous: previous}} ->
+        for body <- [active, previous], is_binary(body), do: body
+
+      _missing_or_unreadable ->
+        []
+    end
+  end
 
   @doc """
   The id a signed manifest is known by — `MobDeliver.Manifest.content_id/1`,
@@ -308,7 +327,10 @@ defmodule MobDeliver.Store do
     reply =
       with {:ok, keep} <- referenced(slots) do
         blobs = Path.join(root(table), "blobs")
-        root_tmp = Path.wildcard(Path.join(root(table), "*.tmp-*"))
+
+        tmp =
+          Path.wildcard(Path.join(root(table), "*.tmp-*")) ++
+            Path.wildcard(Path.join([root(table), "gate", "*.tmp-*"]))
 
         doomed =
           case File.ls(blobs) do
@@ -319,7 +341,7 @@ defmodule MobDeliver.Store do
               []
           end
 
-        {:ok, Enum.count(doomed ++ root_tmp, &(File.rm(&1) == :ok))}
+        {:ok, Enum.count(doomed ++ tmp, &(File.rm(&1) == :ok))}
       end
 
     {:reply, reply, s}

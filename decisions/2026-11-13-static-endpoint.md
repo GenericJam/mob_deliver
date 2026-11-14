@@ -39,26 +39,31 @@ percent-encoded as one path segment each). Everything else is unchanged:
 the body is the same signed manifest, verified against the build's key,
 app and channel before any field is used; blobs are still
 `GET <endpoint>/beam/<sha256>` and hashed on receipt; install, probation,
-rollback, the update gate and JIT refresh are the same code. The default,
-`:server`, keeps `POST /manifest`. An unknown value disables the plugin at
-boot (`{:invalid_endpoint_type, value}`, logged with what to fix), like a
+rollback, the update gate and JIT refresh are the same code. The default
+(unset or `nil`), `:server`, keeps `POST /manifest`. Any other value,
+`false` included, disables the plugin at boot
+(`{:invalid_endpoint_type, value}`, logged with what to fix), like a
 malformed key.
 
 So the static layout is `mob_deliver_server`'s publish directory, uploaded
 as it is. No second format, no new publish tool.
 
-**Freshness is the replay floor's job, unchanged.** No new `sequence`
-field: `issued_at` is already signed, already monotonic per device, and
-the replay floor (`2026-10-15-replay-floor.md`, `MobDeliver.Floor`)
-already refuses any manifest older than the newest one the device has
-verified, or a different one with the same `issued_at`, persisted across
-restarts and never lowered by a rollback. A stale CDN copy and a replayed
-publish are the same event to the device: an older signed manifest. Both
-are refused with `{:error, {:downgrade, info}}` before anything is
-downloaded; the device keeps what it runs and picks up the newer publish
-at the next check that reaches a fresh copy. A second counter would need
-its own persistence and migration and would order exactly what `issued_at`
-orders.
+**Freshness is the replay floor's job.** No new `sequence` field:
+`issued_at` is already signed, already monotonic per device, and the
+replay floor (`2026-10-15-replay-floor.md`, `MobDeliver.Floor`) already
+refuses any manifest older than the newest one the device has verified,
+or a different one with the same `issued_at`, and is never lowered by a
+rollback. Its review for this change found the floor could be lost across
+a restart (an unpersisted or damaged `gate.json`, a channel switch); the
+floor now fails closed: nothing is used unless its record is persisted,
+the record is kept in two copies per app and channel, and it's recovered
+from the store's slots too (that ADR's 2026-11-14 amendment). A stale CDN
+copy and a replayed publish are the same event to the device: an older
+signed manifest. Both are refused with `{:error, {:downgrade, info}}`
+before anything is downloaded; the device keeps what it runs and picks up
+the newer publish at the next check that reaches a fresh copy. A second
+counter would need its own persistence and migration and would order
+exactly what `issued_at` orders.
 
 The refusal stays an error (logged) in static mode too. On a static host a
 stale copy shortly after a publish is expected; it shows up at most for

@@ -8,9 +8,12 @@ defmodule MobDeliver.Floor do
   # JIT refresh (MobDeliver.Refresh).
   #
   # The mark is the update gate's record (MobDeliver.Gate.newest/1): the
-  # newest verified manifest, installed or not, persisted signed and
-  # re-verified at boot. The active slot counts too, so a lost or
-  # unverifiable gate file still can't take the device below what it runs.
+  # newest verified manifest for this app and channel, installed or not,
+  # persisted signed in two copies and re-verified at boot, where it's
+  # recovered from the store's slots too if both copies are lost. A fetched
+  # manifest is recorded first (record/3) and not used at all unless that
+  # was persisted, so nothing is acted on that a restart could forget. The
+  # active slot counts too.
   # A watchdog rollback moves the active slot back but never the gate's
   # record, so it doesn't lower the mark; and since it reinstates a slot
   # rather than installing, it isn't checked here. The active manifest
@@ -33,6 +36,30 @@ defmodule MobDeliver.Floor do
           newest_id: Store.manifest_id(),
           newest_issued_at: DateTime.t()
         }
+
+  @doc """
+  Records a freshly verified manifest with the update gate: the mark, for
+  this and every later check. `{:error, {:floor_not_persisted, reason}}`,
+  logged, if it couldn't be persisted; the caller must not use the manifest
+  (after a restart the device wouldn't know it had seen it, and an older
+  one would pass).
+  """
+  @spec record(GenServer.server(), binary(), Manifest.t()) ::
+          :ok | {:error, {:floor_not_persisted, term()}}
+  def record(gate, body, %Manifest{} = manifest) do
+    case Gate.record(gate, body, manifest) do
+      :ok ->
+        :ok
+
+      {:error, reason} ->
+        Logger.error(
+          "mob_deliver: could not persist the newest verified manifest (the replay floor; " <>
+            "#{inspect(reason)}); not using manifest #{Store.manifest_id(body)}"
+        )
+
+        {:error, {:floor_not_persisted, reason}}
+    end
+  end
 
   @doc """
   `:ok` if `manifest` (content id `id`) is at or above the floor, else
