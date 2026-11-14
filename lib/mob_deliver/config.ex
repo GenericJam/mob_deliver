@@ -104,12 +104,21 @@ defmodule MobDeliver.Config do
   def client_opts do
     [
       endpoint: get(:endpoint),
+      endpoint_type: endpoint_type(),
       app: app(),
       channel: channel(),
       trusted_publish_key: trusted_publish_key(),
       req_options: get(:req_options) || []
     ]
   end
+
+  @doc """
+  How the manifest is fetched: `:server` (default, `POST /manifest`) or
+  `:static` (`GET /manifests/<app>/<channel>.json` from a static host).
+  Any other value is returned as is; boot disables the plugin for it.
+  """
+  @spec endpoint_type() :: term()
+  def endpoint_type, do: get(:endpoint_type) || :server
 
   @doc """
   The settings update checks can't run without, if unset. On a device

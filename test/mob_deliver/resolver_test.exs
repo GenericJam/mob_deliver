@@ -441,7 +441,11 @@ defmodule MobDeliver.ResolverTest do
     test "the server's manifest isn't used if this app version is below its floor", ctx do
       {mod, bin} = beam("defmodule MobDeliverJit#{ctx.id}.TooNew do def hi, do: :new end")
       opts = publish(ctx, [], %{sha(bin) => bin})
-      publish_latest(ctx, [{mod, bin}], %{"min_app_version" => "3.0"})
+      # Below the floor but before its deadline (past it, the gate is required).
+      publish_latest(ctx, [{mod, bin}], %{
+        "min_app_version" => "3.0",
+        "force_update_after" => "2099-01-01T00:00:00Z"
+      })
 
       assert Resolver.resolve(mod, opts) == {:error, :not_found}
       refute :code.is_loaded(mod)
@@ -470,7 +474,11 @@ defmodule MobDeliver.ResolverTest do
 
       # A newer manifest is verified (the floor rises) but not used, as
       # after a watchdog rollback from it.
-      publish_latest(ctx, [{mod, bin}], %{"min_app_version" => "3.0"})
+      publish_latest(ctx, [{mod, bin}], %{
+        "min_app_version" => "3.0",
+        "force_update_after" => "2099-01-01T00:00:00Z"
+      })
+
       assert Resolver.resolve(mod, opts) == {:error, :not_found}
 
       # The server answers with the active manifest again: not a replay.

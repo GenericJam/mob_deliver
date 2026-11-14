@@ -106,6 +106,10 @@ config :mob_deliver,
   trusted_publish_key: "ed25519:<base64-of-your-app's-Ed25519-public-key>",
   app: "com.example.myapp",
   endpoint: "https://updates.myapp.com",
+  # :server (default): POST /manifest to mob_deliver_server's plug.
+  # :static: GET <endpoint>/manifests/<app>/<channel>.json from a static
+  # host (GitHub Pages, a bucket) serving the publish directory as it is.
+  endpoint_type: :server,
   channel: :production,
   # CA certificates for HTTPS; required on Android (see below).
   req_options: [
@@ -145,6 +149,18 @@ for requests made after it runs. It runs in your app's `on_start`, which
 is *after* mob_deliver's boot-time update check has started, so that
 first check can fail and the next one is an interval away. Prefer
 `req_options`.
+
+### Hosting without a server
+
+With `endpoint_type: :static`, any static host works: upload the directory
+`mix mob_deliver.publish` writes (`manifests/<app>/<channel>.json` and
+`beam/<sha>`) as it is and point `endpoint` at it, e.g. a `gh-pages`
+branch served by GitHub Pages. Static hosts cache: a device can be served
+the previous manifest for a while after a publish (ten minutes on GitHub
+Pages). A device that has already seen the newer one refuses the older
+(the replay floor, `{:error, {:downgrade, _}}`) and picks the newer one up
+at a later check. See the [operator manual](guides/operator_manual.md#3-delivery-endpoint)
+and `decisions/2026-11-13-static-endpoint.md`.
 
 ## Usage
 

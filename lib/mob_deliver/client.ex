@@ -1,6 +1,18 @@
 defmodule MobDeliver.Client do
   @moduledoc """
-  HTTP side of wire format v1: `POST /manifest`.
+  HTTP side of wire format v1: the manifest and `GET /beam/:sha256`.
+
+  Two kinds of endpoint (`:endpoint_type`):
+
+    * `:server` (default) — `POST /manifest` with the app and channel, as
+      `mob_deliver_server`'s plug answers it.
+    * `:static` — `GET /manifests/<app>/<channel>.json`: a static host
+      (GitHub Pages, a bucket, any file server) serving the directory
+      `mix mob_deliver.publish` writes, as it is. No server code; see
+      `decisions/2026-11-13-static-endpoint.md`.
+
+  Either way the body is the same signed manifest, verified the same way,
+  and blobs are `GET /beam/:sha256`.
 
   Uses `Req`. TLS trust is the host app's call: pass `cacerts` /
   `partial_chain` etc. through `:req_options`. On Android the BEAM has no
@@ -14,8 +26,11 @@ defmodule MobDeliver.Client do
 
   @accept "application/vnd.mob-deliver.v1+json"
 
+  @type endpoint_type :: :server | :static
+
   @type option ::
           {:endpoint, String.t()}
+          | {:endpoint_type, endpoint_type()}
           | {:app, String.t()}
           | {:channel, String.t() | atom()}
           | {:trusted_publish_key, String.t() | nil}
@@ -30,8 +45,9 @@ defmodule MobDeliver.Client do
 
   @doc """
   Fetches and verifies the manifest for `:app` on `:channel` from
-  `:endpoint`. Returns the parsed manifest and the signed body it came
-  from (what `MobDeliver.Store` persists and re-verifies).
+  `:endpoint` (`POST /manifest`, or with `endpoint_type: :static` a `GET`
+  of the published file). Returns the parsed manifest and the signed body
+  it came from (what `MobDeliver.Store` persists and re-verifies).
 
   Fails before any request when `:trusted_publish_key` is unset: there is
   no unverified mode. `{:error, :not_configured}` (logged, naming the
@@ -39,6 +55,11 @@ defmodule MobDeliver.Client do
   `:req_options` are merged over the defaults, which disable Req's
   automatic retries (scheduling and retry policy belong to the caller)
   and body decoding (the body is verified as raw JSON).
+
+  A static host can serve a stale copy (a CDN keeps it for minutes after
+  a publish). That's not detected here: an older manifest than the newest
+  this device has verified is refused by the replay floor
+  (`MobDeliver.Floor`), as any replay is.
   """
   @spec fetch_manifest([option()]) :: {:ok, Manifest.t(), binary()} | {:error, error()}
   def fetch_manifest(opts) do
@@ -82,18 +103,35 @@ defmodule MobDeliver.Client do
     app = Keyword.fetch!(opts, :app)
     channel = opts |> Keyword.fetch!(:channel) |> to_string()
 
-    request_opts = [
-      method: :post,
-      url: url(opts, "/manifest"),
-      headers: [accept: @accept, content_type: "application/json"],
-      body: JSON.encode!(%{"app" => app, "channel" => channel})
-    ]
-
-    with {:ok, body} <- request(opts, request_opts),
+    with {:ok, body} <- request(opts, manifest_request(opts, app, channel)),
          {:ok, manifest} <- Manifest.verify(body, trusted_key, app: app, channel: channel) do
       {:ok, manifest, body}
     end
   end
+
+  defp manifest_request(opts, app, channel) do
+    case Keyword.get(opts, :endpoint_type, :server) do
+      :server ->
+        [
+          method: :post,
+          url: url(opts, "/manifest"),
+          headers: [accept: @accept, content_type: "application/json"],
+          body: JSON.encode!(%{"app" => app, "channel" => channel})
+        ]
+
+      # mob_deliver_server's publish layout (Storage.FS): manifests/<app>/<channel>.json.
+      # no-cache asks caches on the way to revalidate; a CDN may ignore it,
+      # which is what the replay floor is for.
+      :static ->
+        [
+          method: :get,
+          url: url(opts, "/manifests/#{segment(app)}/#{segment(channel)}.json"),
+          headers: [accept: @accept, cache_control: "no-cache"]
+        ]
+    end
+  end
+
+  defp segment(value), do: URI.encode(value, &URI.char_unreserved?/1)
 
   defp url(opts, path), do: String.trim_trailing(Keyword.fetch!(opts, :endpoint), "/") <> path
 

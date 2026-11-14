@@ -133,8 +133,8 @@ forward "/deliver", MobDeliverServer.Plug,
 
 * `GET /beam/:sha256` is immutable (`max-age=31536000, immutable`, strong
   ETag) — a CDN can cache it indefinitely.
-* `POST /manifest` is `no-cache`; it needs a server (a pure static host
-  can't answer a POST).
+* `POST /manifest` is `no-cache`; it needs a server. A pure static host
+  can't answer a POST: use `endpoint_type: :static` (below).
 * Serve over HTTPS. The signature protects integrity regardless, and a
   device refuses a manifest older than the newest it has seen (see
   "Only a newer publish installs" below); TLS keeps delivered code private
@@ -142,6 +142,32 @@ forward "/deliver", MobDeliverServer.Plug,
   served an older one.
 * For S3/GCS, implement `MobDeliverServer.Storage` and call
   `MobDeliverServer.build/2` + `publish/2` from your own task.
+
+### Static hosting (GitHub Pages, a bucket)
+
+With `config :mob_deliver, endpoint_type: :static` the device GETs
+`<endpoint>/manifests/<app>/<channel>.json` instead of POSTing, so the
+publish directory (section 4) can be served as it is by any static host:
+
+```bash
+# a gh-pages branch checked out in ../site, served at https://<owner>.github.io/<repo>/
+mix mob_deliver.publish --app com.example.myapp --channel production --out ../site/ota
+git -C ../site add -A ota && git -C ../site commit -m "OTA publish" && git -C ../site push
+# config :mob_deliver, endpoint: "https://<owner>.github.io/<repo>/ota", endpoint_type: :static
+```
+
+* Publish into the same directory each time, so blobs earlier manifests
+  name stay published (prune with `mix mob_deliver.prune` as for a
+  server), and the publish task can date the new manifest after the one it
+  replaces.
+* Static hosts cache. GitHub Pages serves `max-age=600`: for up to ten
+  minutes after a publish a device may get the previous manifest. One
+  that has already seen the newer manifest refuses it as a downgrade
+  (logged; nothing downloaded) and installs the newer one at a later
+  check; one that hasn't simply sees no update yet. Add the host's deploy
+  time (about a minute for Pages).
+* Commit blobs and manifest together; a Pages deploy switches the site at
+  once. For a host that uploads file by file, upload `beam/` first.
 
 ## 4. Publishing
 

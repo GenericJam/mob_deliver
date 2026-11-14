@@ -6,6 +6,20 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ---
 
+## [Unreleased]
+
+### Added
+- **Static endpoints** (`config :mob_deliver, endpoint_type: :static`):
+  the manifest is fetched with `GET <endpoint>/manifests/<app>/<channel>.json`
+  instead of `POST /manifest`, so the directory `mix mob_deliver.publish`
+  writes can be served as it is by GitHub Pages, a bucket or any file
+  server. Blobs, verification, install, rollback and the update gate are
+  unchanged. A stale copy from a CDN (or a replayed older publish) is
+  refused by the replay floor like any older manifest. An unknown
+  `endpoint_type` disables the plugin at boot
+  (`{:invalid_endpoint_type, value}`). See
+  `decisions/2026-11-13-static-endpoint.md`.
+
 ## [0.4.0] - 2026-10-15
 
 ### Security

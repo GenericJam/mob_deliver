@@ -7,7 +7,7 @@ defmodule MobDeliver.ConfigTest do
   @moduletag :capture_log
   @moduletag :tmp_dir
 
-  @keys [:trusted_publish_key, :endpoint, :app, :channel, :req_options]
+  @keys [:trusted_publish_key, :endpoint, :endpoint_type, :app, :channel, :req_options]
 
   setup do
     previous = for key <- @keys, do: {key, Application.fetch_env(:mob_deliver, key)}
@@ -45,6 +45,22 @@ defmodule MobDeliver.ConfigTest do
 
     configure(key)
     assert {:ok, %Manifest{app: "com.example.app"}} = MobDeliver.fetch_manifest()
+  end
+
+  test "endpoint_type: :static fetches the published manifest file with a GET" do
+    {key, private} = TestPublisher.keypair()
+    body = TestPublisher.fields() |> TestPublisher.sign(private) |> JSON.encode!()
+
+    Req.Test.stub(__MODULE__, fn conn ->
+      send(self(), {:request, conn.method, conn.request_path})
+      Plug.Conn.send_resp(conn, 200, body)
+    end)
+
+    configure(key)
+    Application.put_env(:mob_deliver, :endpoint_type, :static)
+
+    assert {:ok, %Manifest{app: "com.example.app"}} = MobDeliver.fetch_manifest()
+    assert_received {:request, "GET", "/manifests/com.example.app/production.json"}
   end
 
   test "on a device, a build without its config module trusts no runtime key", %{tmp_dir: tmp} do
@@ -167,6 +183,27 @@ defmodule MobDeliver.ConfigTest do
     again = :"cfg_store_again_#{n}"
     start_supervised!({Store, name: again, root: root}, id: again)
     assert {:ok, %Manifest{}} = Store.boot(again, verify)
+  end
+
+  test "an unknown endpoint_type at boot disables updates and says what to fix",
+       %{tmp_dir: root} do
+    n = System.unique_integer([:positive])
+    store = :"cfg_store_type_#{n}"
+    watchdog = :"cfg_wd_type_#{n}"
+    start_supervised!({Store, name: store, root: root}, id: store)
+    start_supervised!({Watchdog, name: watchdog, store: store}, id: watchdog)
+
+    {key, _} = TestPublisher.keypair()
+    configure(key)
+    Application.put_env(:mob_deliver, :endpoint_type, :github)
+
+    log =
+      ExUnit.CaptureLog.capture_log(fn ->
+        assert Boot.run(store: store, watchdog: watchdog, poller: nil) == :ok
+      end)
+
+    assert log =~ ":endpoint_type is :github"
+    assert Boot.readiness(store) == {:disabled, {:invalid_endpoint_type, :github}}
   end
 
   test "after a malformed-key boot, resolve reports the disabled plugin and why", %{tmp_dir: root} do

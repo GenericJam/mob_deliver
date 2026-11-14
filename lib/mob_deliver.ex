@@ -316,7 +316,10 @@ defmodule MobDeliver do
   def update_status, do: running(&MobDeliver.Gate.status/0, :ok)
 
   @typedoc "Why boot disabled the plugin; see `state/0`."
-  @type disabled_reason :: {:not_configured, [atom()]} | :invalid_trusted_publish_key
+  @type disabled_reason ::
+          {:not_configured, [atom()]}
+          | :invalid_trusted_publish_key
+          | {:invalid_endpoint_type, term()}
 
   @typedoc "See `state/0`."
   @type state :: %{
@@ -335,8 +338,9 @@ defmodule MobDeliver do
   reports `running: false` and empty values.
 
     * `:disabled` — why boot disabled the plugin, or `nil` if it didn't
-      (or hasn't run): `:invalid_trusted_publish_key` or
-      `{:not_configured, missing_keys}`. The app then runs its bundled
+      (or hasn't run): `:invalid_trusted_publish_key`,
+      `{:not_configured, missing_keys}` or `{:invalid_endpoint_type, value}`.
+      The app then runs its bundled
       code and nothing is checked or delivered.
     * `:active` — the active manifest's id and `issued_at`, or `nil` when
       the app runs its bundled code.

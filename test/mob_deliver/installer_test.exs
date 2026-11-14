@@ -546,4 +546,167 @@ defmodule MobDeliver.InstallerTest do
       assert Installer.check(opts(relaunched, fixed, blobs)) == {:ok, :installed}
     end
   end
+
+  describe "static endpoint: the publish directory served as files" do
+    # A static host (GitHub Pages, a bucket) serving mob_deliver_server's
+    # publish layout under /ota: GET only, files as they are on disk.
+    defp site(ctx), do: Path.join(ctx.root, "site")
+
+    # What a publish writes: blobs first, then the manifest.
+    defp publish!(ctx, manifest_body, blobs) do
+      for {sha, bytes} <- blobs do
+        File.mkdir_p!(Path.join(site(ctx), "beam"))
+        File.write!(Path.join([site(ctx), "beam", sha]), bytes)
+      end
+
+      dir = Path.join([site(ctx), "manifests", "com.example.app"])
+      File.mkdir_p!(dir)
+      File.write!(Path.join(dir, "production.json"), manifest_body)
+    end
+
+    defp static_opts(ctx, overrides \\ []) do
+      test_pid = self()
+      root = site(ctx)
+
+      plug = fn
+        %{method: "GET", request_path: "/ota/" <> path} = conn ->
+          send(test_pid, {:static_get, path})
+
+          case File.read(Path.join(root, path)) do
+            {:ok, bytes} -> Plug.Conn.send_resp(conn, 200, bytes)
+            {:error, _} -> Plug.Conn.send_resp(conn, 404, "Not Found")
+          end
+
+        conn ->
+          send(test_pid, {:static_other, conn.method, conn.request_path})
+          Plug.Conn.send_resp(conn, 405, "")
+      end
+
+      opts(ctx, nil, %{}, overrides)
+      |> Keyword.update!(:client_opts, fn client ->
+        Keyword.merge(client,
+          endpoint: "https://example.github.io/ota/",
+          endpoint_type: :static,
+          req_options: [plug: plug]
+        )
+      end)
+    end
+
+    defp blobs(contents), do: Map.new(contents, &{sha(&1), &1})
+
+    test "installs from the published files with GETs only", ctx do
+      v1 = at(ctx, [{"MyApp.Home", "home 1"}], "2026-11-01T00:00:00Z")
+      activate!(ctx, at(ctx, [{"MyApp.Home", "home 0"}], "2026-10-31T00:00:00Z"))
+      publish!(ctx, v1, blobs(["home 1"]))
+
+      assert Installer.check(static_opts(ctx)) == {:ok, :installed}
+      assert Store.active_id(ctx.store) == Store.manifest_id(v1)
+      assert_received {:static_get, "manifests/com.example.app/production.json"}
+      assert_received {:static_get, "beam/" <> fetched}
+      assert fetched == sha("home 1")
+      refute_received {:static_other, _, _}
+
+      assert Installer.check(static_opts(ctx)) == {:ok, :current}
+    end
+
+    test "a stale copy served after the device saw a newer publish is refused, and nothing is downloaded",
+         ctx do
+      v1 = at(ctx, [{"MyApp.Home", "home 1"}], "2026-11-01T00:00:00Z")
+      v2 = at(ctx, [{"MyApp.Home", "home 2"}], "2026-11-02T00:00:00Z")
+      publish!(ctx, v1, blobs(["home 1"]))
+      assert Installer.check(static_opts(ctx)) == {:ok, :installed}
+      ctx = proven(ctx)
+
+      publish!(ctx, v2, blobs(["home 2"]))
+      assert Installer.check(static_opts(ctx)) == {:ok, :installed}
+      ctx = proven(ctx)
+
+      # A CDN edge still holding v1's file (v1's blobs are still published too).
+      publish!(ctx, v1, %{})
+      flush_static()
+
+      assert {:error, {:downgrade, %{newest_id: newest}}} = Installer.check(static_opts(ctx))
+      assert newest == Store.manifest_id(v2)
+      assert Store.active_id(ctx.store) == Store.manifest_id(v2)
+      assert_received {:static_get, "manifests/" <> _}
+      refute_received {:static_get, "beam/" <> _}
+    end
+
+    test "an older signed manifest replayed after a restart is refused", ctx do
+      v1 = at(ctx, [{"MyApp.Home", "home 1"}], "2026-11-01T00:00:00Z")
+      v2 = at(ctx, [{"MyApp.Home", "home 2"}], "2026-11-02T00:00:00Z")
+      publish!(ctx, v2, blobs(["home 2"]))
+      assert Installer.check(static_opts(ctx)) == {:ok, :installed}
+
+      # Whoever controls the host puts back an older publish (it verifies:
+      # signed manifests never expire), along with its blobs.
+      publish!(ctx, v1, blobs(["home 1"]))
+      relaunched = ctx |> restart() |> proven()
+
+      assert {:error, {:downgrade, _}} = Installer.check(static_opts(relaunched))
+      assert Store.active_id(relaunched.store) == Store.manifest_id(v2)
+    end
+
+    test "a manifest file that doesn't verify installs nothing and downloads nothing", ctx do
+      {_other_key, other_private} = TestPublisher.keypair()
+      forged = body(ctx, [{"MyApp.Home", "evil"}], other_private)
+      publish!(ctx, forged, blobs(["evil"]))
+
+      assert Installer.check(static_opts(ctx)) == {:error, :invalid_signature}
+      assert Store.active_id(ctx.store) == nil
+      refute_received {:static_get, "beam/" <> _}
+
+      # A tampered body (a signed manifest with a module swapped) likewise.
+      signed = JSON.decode!(body(ctx, [{"MyApp.Home", "home"}]))
+      tampered = put_in(signed, ["modules", "MyApp.Home"], "sha256:" <> sha("evil"))
+      publish!(ctx, JSON.encode!(tampered), %{})
+      assert Installer.check(static_opts(ctx)) == {:error, :invalid_signature}
+      assert Store.active_id(ctx.store) == nil
+    end
+
+    test "a blob whose bytes don't match its SHA is discarded and nothing is installed", ctx do
+      current = at(ctx, [{"MyApp.Home", "home 1"}], "2026-11-01T00:00:00Z")
+      activate!(ctx, current)
+      update = at(ctx, [{"MyApp.Home", "home 2"}], "2026-11-02T00:00:00Z")
+      publish!(ctx, update, %{sha("home 2") => "not home 2"})
+
+      assert {:error, {:prefetch_failed, bad, :sha_mismatch}} = Installer.check(static_opts(ctx))
+      assert bad == sha("home 2")
+      refute Store.has_blob?(ctx.store, sha("home 2"))
+      assert Store.active_id(ctx.store) == Store.manifest_id(current)
+    end
+
+    test "a crashing update is rolled back as before and the same file isn't reinstalled", ctx do
+      good = at(ctx, [{"MyApp.Home", "good"}], "2026-11-01T00:00:00Z")
+      bad = at(ctx, [{"MyApp.Home", "bad"}], "2026-11-02T00:00:00Z")
+      publish!(ctx, good, blobs(["good"]))
+      assert Installer.check(static_opts(ctx)) == {:ok, :installed}
+      {stable, {:ok, :armed}} = launch(ctx, %{"MyApp.Home" => sha("good")})
+      :ok = Watchdog.mark_stable(stable)
+
+      publish!(ctx, bad, blobs(["bad"]))
+      assert Installer.check(static_opts(ctx, watchdog: stable)) == {:ok, :installed}
+
+      # The probation launch dies before first idle; the next rolls back.
+      {_, {:ok, :armed}} = launch(ctx, %{"MyApp.Home" => sha("bad")})
+      {rolled, {:ok, :rolled_back}} = launch(ctx, %{})
+      assert Store.active_id(ctx.store) == Store.manifest_id(good)
+
+      # The host still serves the bad publish: refused, not reinstalled.
+      assert Installer.check(static_opts(ctx, watchdog: rolled)) == {:ok, :rejected}
+      assert Store.active_id(ctx.store) == Store.manifest_id(good)
+
+      fixed = at(ctx, [{"MyApp.Home", "fixed"}], "2026-11-03T00:00:00Z")
+      publish!(ctx, fixed, blobs(["fixed"]))
+      assert Installer.check(static_opts(ctx, watchdog: rolled)) == {:ok, :installed}
+    end
+
+    defp flush_static do
+      receive do
+        {:static_get, _} -> flush_static()
+      after
+        0 -> :ok
+      end
+    end
+  end
 end
