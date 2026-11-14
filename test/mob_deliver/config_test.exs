@@ -185,25 +185,31 @@ defmodule MobDeliver.ConfigTest do
     assert {:ok, %Manifest{}} = Store.boot(again, verify)
   end
 
-  test "an unknown endpoint_type at boot disables updates and says what to fix",
+  test "an unknown endpoint_type at boot, false included, disables updates and says what to fix",
        %{tmp_dir: root} do
-    n = System.unique_integer([:positive])
-    store = :"cfg_store_type_#{n}"
-    watchdog = :"cfg_wd_type_#{n}"
-    start_supervised!({Store, name: store, root: root}, id: store)
-    start_supervised!({Watchdog, name: watchdog, store: store}, id: watchdog)
-
     {key, _} = TestPublisher.keypair()
     configure(key)
-    Application.put_env(:mob_deliver, :endpoint_type, :github)
 
-    log =
-      ExUnit.CaptureLog.capture_log(fn ->
-        assert Boot.run(store: store, watchdog: watchdog, poller: nil) == :ok
-      end)
+    for type <- [:github, false] do
+      n = System.unique_integer([:positive])
+      store = :"cfg_store_type_#{n}"
+      watchdog = :"cfg_wd_type_#{n}"
+      start_supervised!({Store, name: store, root: Path.join(root, "#{n}")}, id: store)
+      start_supervised!({Watchdog, name: watchdog, store: store}, id: watchdog)
+      Application.put_env(:mob_deliver, :endpoint_type, type)
 
-    assert log =~ ":endpoint_type is :github"
-    assert Boot.readiness(store) == {:disabled, {:invalid_endpoint_type, :github}}
+      log =
+        ExUnit.CaptureLog.capture_log(fn ->
+          assert Boot.run(store: store, watchdog: watchdog, poller: nil) == :ok
+        end)
+
+      assert log =~ ":endpoint_type is #{inspect(type)}"
+      assert Boot.readiness(store) == {:disabled, {:invalid_endpoint_type, type}}
+    end
+
+    # Unset or nil is the default.
+    Application.put_env(:mob_deliver, :endpoint_type, nil)
+    assert MobDeliver.Config.endpoint_type() == :server
   end
 
   test "after a malformed-key boot, resolve reports the disabled plugin and why", %{tmp_dir: root} do
