@@ -69,6 +69,9 @@ defmodule MobDeliver.Boot do
       configured? and not Manifest.valid_key?(Config.trusted_publish_key()) ->
         {:disabled, :invalid_trusted_publish_key}
 
+      configured? and Config.endpoint_type() not in [:server, :static] ->
+        {:disabled, {:invalid_endpoint_type, Config.endpoint_type()}}
+
       true ->
         :ok
     end
@@ -90,6 +93,12 @@ defmodule MobDeliver.Boot do
       "config :mob_deliver, :trusted_publish_key isn't a valid key " <>
         "(expected \"ed25519:\" <> base64 of the 32-byte public key, as printed by " <>
         "mix mob_deliver.gen.key); fix it and rebuild"
+
+  def describe({:invalid_endpoint_type, value}),
+    do:
+      "config :mob_deliver, :endpoint_type is #{inspect(value)}; expected :server " <>
+        "(POST /manifest, the default) or :static (a static host serving the publish " <>
+        "directory); fix it and rebuild"
 
   @doc "Verifies a stored or fetched manifest body against this build's key, app, and channel."
   @spec verifier() :: Store.verify_fun()

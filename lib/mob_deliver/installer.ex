@@ -37,12 +37,10 @@ defmodule MobDeliver.Installer do
   def check(opts \\ []) do
     opts = defaults(opts)
 
-    with {:ok, manifest, body} <- Client.fetch_manifest(opts[:client_opts]) do
-      # The gate follows the newest verified manifest, installable or not.
-      with {:error, reason} <- Gate.record(opts[:gate], body, manifest) do
-        Logger.warning("mob_deliver: could not record update-gate manifest (#{inspect(reason)})")
-      end
-
+    # The gate follows the newest verified manifest, installable or not, and
+    # nothing is used unless that record is durable (MobDeliver.Floor).
+    with {:ok, manifest, body} <- Client.fetch_manifest(opts[:client_opts]),
+         :ok <- Floor.record(opts[:gate], body, manifest) do
       id = Store.manifest_id(body)
       expected = Store.active_id(opts[:store])
 

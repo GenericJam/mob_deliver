@@ -104,11 +104,26 @@ defmodule MobDeliver.Config do
   def client_opts do
     [
       endpoint: get(:endpoint),
+      endpoint_type: endpoint_type(),
       app: app(),
       channel: channel(),
       trusted_publish_key: trusted_publish_key(),
       req_options: get(:req_options) || []
     ]
+  end
+
+  @doc """
+  How the manifest is fetched: `:server` (`POST /manifest`; the default,
+  when unset or `nil`) or `:static` (`GET /manifests/<app>/<channel>.json`
+  from a static host). Any other value, `false` included, is returned as
+  is; boot disables the plugin for it.
+  """
+  @spec endpoint_type() :: term()
+  def endpoint_type do
+    case get(:endpoint_type) do
+      nil -> :server
+      type -> type
+    end
   end
 
   @doc """

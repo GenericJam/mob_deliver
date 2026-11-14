@@ -135,6 +135,11 @@ defmodule MobDeliver do
       newest one's (`:newest_id`, `:newest_issued_at`). The same
       manifest fetched again is never refused. Publish again (a new
       `issued_at`) to ship older code on purpose.
+    * `{:error, {:floor_not_persisted, reason}}` — the manifest verified,
+      but the device couldn't persist it as the newest it has verified (a
+      storage error); it isn't used, since after a restart the device
+      wouldn't know it had seen it. Logged as an error; the next check
+      retries.
     * `{:error, reason}` — fetch, verification, or prefetch failed; nothing
       changed. Network and TLS failures are `{:transport, _}`.
     * `{:error, :not_running}` — mob_deliver's processes aren't running
@@ -227,7 +232,9 @@ defmodule MobDeliver do
       fetched this way (it has no probation record, so it mustn't be able
       to fail a launch): `{:error, :not_found}`. A server manifest older
       than the newest this device has verified isn't used:
-      `{:error, {:downgrade, info}}` (as for `check/0`).
+      `{:error, {:downgrade, info}}`, nor one that couldn't be persisted
+      as the newest verified: `{:error, {:floor_not_persisted, reason}}`
+      (as for `check/0`).
     * Otherwise → `Code.ensure_loaded/1` (bundled code), or
       `{:error, :not_found}`.
     * Past the forced-update deadline → `{:error, :update_required}`,
@@ -316,7 +323,10 @@ defmodule MobDeliver do
   def update_status, do: running(&MobDeliver.Gate.status/0, :ok)
 
   @typedoc "Why boot disabled the plugin; see `state/0`."
-  @type disabled_reason :: {:not_configured, [atom()]} | :invalid_trusted_publish_key
+  @type disabled_reason ::
+          {:not_configured, [atom()]}
+          | :invalid_trusted_publish_key
+          | {:invalid_endpoint_type, term()}
 
   @typedoc "See `state/0`."
   @type state :: %{
@@ -335,8 +345,9 @@ defmodule MobDeliver do
   reports `running: false` and empty values.
 
     * `:disabled` — why boot disabled the plugin, or `nil` if it didn't
-      (or hasn't run): `:invalid_trusted_publish_key` or
-      `{:not_configured, missing_keys}`. The app then runs its bundled
+      (or hasn't run): `:invalid_trusted_publish_key`,
+      `{:not_configured, missing_keys}` or `{:invalid_endpoint_type, value}`.
+      The app then runs its bundled
       code and nothing is checked or delivered.
     * `:active` — the active manifest's id and `issued_at`, or `nil` when
       the app runs its bundled code.

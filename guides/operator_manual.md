@@ -133,8 +133,8 @@ forward "/deliver", MobDeliverServer.Plug,
 
 * `GET /beam/:sha256` is immutable (`max-age=31536000, immutable`, strong
   ETag) — a CDN can cache it indefinitely.
-* `POST /manifest` is `no-cache`; it needs a server (a pure static host
-  can't answer a POST).
+* `POST /manifest` is `no-cache`; it needs a server. A pure static host
+  can't answer a POST: use `endpoint_type: :static` (below).
 * Serve over HTTPS. The signature protects integrity regardless, and a
   device refuses a manifest older than the newest it has seen (see
   "Only a newer publish installs" below); TLS keeps delivered code private
@@ -142,6 +142,33 @@ forward "/deliver", MobDeliverServer.Plug,
   served an older one.
 * For S3/GCS, implement `MobDeliverServer.Storage` and call
   `MobDeliverServer.build/2` + `publish/2` from your own task.
+
+### Static hosting (GitHub Pages, a bucket)
+
+With `config :mob_deliver, endpoint_type: :static` the device GETs
+`<endpoint>/manifests/<app>/<channel>.json` instead of POSTing, so the
+publish directory (section 4) can be served as it is by any static host:
+
+```bash
+# a gh-pages branch checked out in ../site, served at https://<owner>.github.io/<repo>/
+mix mob_deliver.publish --app com.example.myapp --channel production --out ../site/ota
+git -C ../site add -A ota && git -C ../site commit -m "OTA publish" && git -C ../site push
+# config :mob_deliver, endpoint: "https://<owner>.github.io/<repo>/ota", endpoint_type: :static
+```
+
+* Publish into the same directory each time, so blobs earlier manifests
+  name stay published (prune with `mix mob_deliver.prune` as for a
+  server), and so mob_deliver_server after 0.2.0 can date the new
+  manifest after the one it replaces (below).
+* Static hosts cache. GitHub Pages serves `max-age=600`: for up to ten
+  minutes after a publish a device may get the previous manifest. One
+  that has already seen the newer manifest refuses it as a downgrade
+  (logged; nothing downloaded) and installs the newer one at a later
+  check; one that hasn't simply sees no update yet. Add the host's deploy
+  time (GitHub documents up to ten minutes for a Pages publish to go live;
+  watch the branch's deployment in the repository's Actions tab).
+* Commit blobs and manifest together; a Pages deploy switches the site at
+  once. For a host that uploads file by file, upload `beam/` first.
 
 ## 4. Publishing
 
@@ -197,17 +224,18 @@ signed publish to bring back code you've since fixed. So:
 * To back out a bad update, **publish again** from the older source
   (a new `issued_at`). Putting the old manifest file back on the server
   only reaches devices that never fetched the newer one.
-* Two different manifests with the same `issued_at` (the publish task
-  uses the current second) are refused on any device that saw the other
-  one first. Don't publish twice within a second.
+* Two different manifests with the same `issued_at` are refused on any
+  device that saw the other one first. mob_deliver_server after 0.2.0
+  dates a publish one second after the manifest it replaces when the clock
+  isn't already later (MOB-486); with 0.2.0, which stamps the current
+  second, don't publish twice within a second.
 * A publish dated in the future (a machine with a wrong clock) holds every
   device that fetches it above all later publishes until that time
-  passes. To ship before then, publish with an `issued_at` after it
-  (`MobDeliverServer.build/2` takes `:issued_at`), and give every publish
+  passes. With mob_deliver_server after 0.2.0 the next publish is simply
+  dated after it. With 0.2.0, publish with an `issued_at` after it
+  (`MobDeliverServer.publish/2` takes `:issued_at`) and give every publish
   until the bad time has passed an explicit `issued_at` later than the
-  previous publish's: a normal publish stamps the current time, and a
-  reused `issued_at` is a different manifest at the same time; both are
-  refused.
+  previous publish's.
 
 ## 5. Update window
 
@@ -355,7 +383,8 @@ nothing changed:
 | `{:ok, :rejected}` | the manifest still ships every module version a rolled-back update introduced on this device (log: `refusing … any manifest that still has all of …`); change one of them |
 | `{:ok, :stale_for_build}` | the manifest ships module versions this device's build has newer bundled code for (section 4); publish from the build's source |
 | `{:error, {:protected_modules, keys}}` | the manifest would replace mob_deliver's, mob's or the app config's own code (or Elixir/crypto); never installed — remove those modules from what you publish |
-| `{:error, {:downgrade, info}}` | the server's manifest is older than (or a different one with the same `issued_at` as) the newest this device has verified — `info.newest_id`/`newest_issued_at` (section 4, "Only a newer publish installs"); publish again |
+| `{:error, {:downgrade, info}}` | the server's manifest is older than (or a different one with the same `issued_at` as) the newest this device has verified — `info.newest_id`/`newest_issued_at` (section 4, "Only a newer publish installs"); on a static host shortly after a publish, a cached copy: wait out the cache (section 3); otherwise publish again |
+| `{:error, {:floor_not_persisted, reason}}` | the device couldn't write its record of the newest manifest it has verified (the replay floor, `<data dir>/mob_deliver/gate/`): storage full or read-only. Nothing is installed or downloaded until it can; the next check retries |
 
 A navigation that does nothing logs `mob_deliver: navigation to X refused,
 it couldn't be delivered (reason)` (the same reasons as above). A module

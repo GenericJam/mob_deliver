@@ -504,17 +504,163 @@ defmodule MobDeliver.InstallerTest do
       assert {:error, {:downgrade, _}} = Installer.check(opts(restart(ctx), between, blobs))
     end
 
-    test "the active manifest is a floor even if the gate's record is lost", ctx do
+    # The files holding this app/channel's gate record (the two copies, or
+    # the single gate.json older versions wrote), primary last.
+    defp gate_records(ctx) do
+      dir = Path.join(ctx.root, "gate")
+
+      copies =
+        case File.ls(dir) do
+          {:ok, names} -> for name <- Enum.sort(names), do: Path.join(dir, name)
+          {:error, _} -> []
+        end
+
+      copies ++ Enum.filter([Path.join(ctx.root, "gate.json")], &File.exists?/1)
+    end
+
+    defp damage!(ctx, :lost), do: File.rm!(List.last(gate_records(ctx)))
+    defp damage!(ctx, :corrupt), do: File.write!(hd(gate_records(ctx)), "{\"manifest_vers")
+
+    defp damage!(ctx, :tampered) do
+      path = hd(gate_records(ctx))
+      File.write!(path, String.replace(File.read!(path), "MyApp.Home", "MyApp.Evil"))
+    end
+
+    defp flush_fetched do
+      receive do
+        {:fetched, _} -> flush_fetched()
+      after
+        0 -> :ok
+      end
+    end
+
+    for damage <- [:lost, :corrupt, :tampered],
+        unused <- [:prefetch_failed, :below_min_version, :deferred] do
+      @tag damage: damage, unused: unused
+      test "a newer manifest verified but not installed (#{unused}) holds the floor across a " <>
+             "restart when a copy of the gate's record is #{damage}",
+           ctx do
+        # "home 3" isn't served: the newer manifest's prefetch fails.
+        blobs = Map.new(["home 1", "home 2"], &{sha(&1), &1})
+        a = at(ctx, [{"MyApp.Home", "home 1"}], "2026-10-01T00:00:00Z")
+        assert Installer.check(opts(ctx, a, blobs)) == {:ok, :installed}
+        # Proven, unless the newer one is to be deferred behind its probation.
+        ctx = if ctx.unused == :deferred, do: ctx, else: proven(ctx)
+
+        extra = if ctx.unused == :below_min_version, do: %{"min_app_version" => "9.0"}, else: %{}
+
+        b =
+          body(
+            ctx,
+            [{"MyApp.Home", "home 3"}],
+            nil,
+            Map.put(extra, "issued_at", "2026-10-03T00:00:00Z")
+          )
+
+        case Installer.check(opts(ctx, b, blobs)) do
+          {:error, {:prefetch_failed, _, _}} -> assert ctx.unused == :prefetch_failed
+          {:ok, outcome} -> assert outcome == ctx.unused
+        end
+
+        assert Store.active_id(ctx.store) == Store.manifest_id(a)
+
+        damage!(ctx, ctx.damage)
+        relaunched = restart(ctx)
+
+        # An older publish than the newest verified one, newer than the active one.
+        c = at(ctx, [{"MyApp.Home", "home 2"}], "2026-10-02T00:00:00Z")
+
+        assert {:error, {:downgrade, %{newest_id: newest}}} =
+                 Installer.check(opts(relaunched, c, blobs))
+
+        assert newest == Store.manifest_id(b)
+        assert Store.active_id(relaunched.store) == Store.manifest_id(a)
+
+        # The damaged copy was rewritten.
+        assert [_, _] = copies = gate_records(relaunched) -- [Path.join(ctx.root, "gate.json")]
+        for path <- copies, do: assert(Store.manifest_id(File.read!(path)) == newest)
+      end
+    end
+
+    test "a newer manifest whose record can't be persisted isn't used; the write is retried and holds across a restart",
+         ctx do
+      blobs = Map.new(["home 1", "home 2", "home 3"], &{sha(&1), &1})
+      a = at(ctx, [{"MyApp.Home", "home 1"}], "2026-10-01T00:00:00Z")
+      assert Installer.check(opts(ctx, a, blobs)) == {:ok, :installed}
+      ctx = proven(ctx)
+      flush_fetched()
+
+      dir = Path.join(ctx.root, "gate")
+      assert File.dir?(dir)
+      File.chmod!(dir, 0o500)
+      on_exit(fn -> File.chmod(dir, 0o700) end)
+
+      b = at(ctx, [{"MyApp.Home", "home 3"}], "2026-10-03T00:00:00Z")
+      assert {:error, {:floor_not_persisted, _}} = Installer.check(opts(ctx, b, blobs))
+      assert Store.active_id(ctx.store) == Store.manifest_id(a)
+      refute_received {:fetched, _}
+
+      # While the write keeps failing, nothing is used.
+      c = at(ctx, [{"MyApp.Home", "home 2"}], "2026-10-02T00:00:00Z")
+      assert {:error, {:floor_not_persisted, _}} = Installer.check(opts(ctx, c, blobs))
+
+      # Once it succeeds (retried by the next check), the older one is refused,
+      # in this session and after a restart.
+      File.chmod!(dir, 0o700)
+      assert {:error, {:downgrade, %{newest_id: newest}}} = Installer.check(opts(ctx, c, blobs))
+      assert newest == Store.manifest_id(b)
+      assert {:error, {:downgrade, _}} = Installer.check(opts(restart(ctx), c, blobs))
+    end
+
+    test "the store's slots are a floor if both copies of the gate's record are lost", ctx do
       blobs = Map.new(["home 1", "home 2"], &{sha(&1), &1})
       new = at(ctx, [{"MyApp.Home", "home 2"}], "2026-10-02T00:00:00Z")
       assert Installer.check(opts(ctx, new, blobs)) == {:ok, :installed}
 
-      File.rm!(Path.join(ctx.root, "gate.json"))
+      File.rm_rf!(Path.join(ctx.root, "gate"))
       relaunched = restart(ctx)
-      assert Gate.newest(relaunched.gate) == nil
+      assert {id, _} = Gate.newest(relaunched.gate)
+      assert id == Store.manifest_id(new)
+      # Both copies rewritten from the slot.
+      assert [_, _] = copies = gate_records(relaunched)
+      for path <- copies, do: assert(Store.manifest_id(File.read!(path)) == id)
 
       old = at(ctx, [{"MyApp.Home", "home 1"}], "2026-10-01T00:00:00Z")
       assert {:error, {:downgrade, _}} = Installer.check(opts(relaunched, old, blobs))
+    end
+
+    test "switching channel and back keeps each channel's floor", ctx do
+      blobs = Map.new(["home 1", "home 2", "beta"], &{sha(&1), &1})
+      p1 = at(ctx, [{"MyApp.Home", "home 1"}], "2026-10-01T00:00:00Z")
+      p2 = at(ctx, [{"MyApp.Home", "home 2"}], "2026-10-02T00:00:00Z")
+      assert Installer.check(opts(ctx, p2, blobs)) == {:ok, :installed}
+      ctx = proven(ctx)
+
+      # A build on beta: the production slots don't verify and are dropped.
+      beta_verify = &Manifest.verify(&1, ctx.key, app: "com.example.app", channel: "beta")
+      beta = %{ctx | verify: beta_verify} |> restart() |> proven()
+      assert Store.active_id(beta.store) == nil
+
+      b1 =
+        body(ctx, [{"MyApp.Home", "beta"}], nil, %{
+          "issued_at" => "2026-10-05T00:00:00Z",
+          "channel" => "beta"
+        })
+
+      beta_opts =
+        opts(beta, b1, blobs)
+        |> Keyword.update!(:client_opts, &Keyword.put(&1, :channel, "beta"))
+
+      assert Installer.check(beta_opts) == {:ok, :installed}
+
+      # Back on production: p1 is older than p2, which this device verified there.
+      production = restart(%{beta | verify: ctx.verify})
+      assert Store.active_id(production.store) == nil
+
+      assert {:error, {:downgrade, %{newest_id: newest}}} =
+               Installer.check(opts(production, p1, blobs))
+
+      assert newest == Store.manifest_id(p2)
     end
 
     test "a watchdog rollback still reinstates the previous manifest, and doesn't lower the floor",
@@ -544,6 +690,169 @@ defmodule MobDeliver.InstallerTest do
 
       fixed = at(ctx, [{"MyApp.Home", "fixed"}], "2026-10-04T00:00:00Z")
       assert Installer.check(opts(relaunched, fixed, blobs)) == {:ok, :installed}
+    end
+  end
+
+  describe "static endpoint: the publish directory served as files" do
+    # A static host (GitHub Pages, a bucket) serving mob_deliver_server's
+    # publish layout under /ota: GET only, files as they are on disk.
+    defp site(ctx), do: Path.join(ctx.root, "site")
+
+    # What a publish writes: blobs first, then the manifest.
+    defp publish!(ctx, manifest_body, blobs) do
+      for {sha, bytes} <- blobs do
+        File.mkdir_p!(Path.join(site(ctx), "beam"))
+        File.write!(Path.join([site(ctx), "beam", sha]), bytes)
+      end
+
+      dir = Path.join([site(ctx), "manifests", "com.example.app"])
+      File.mkdir_p!(dir)
+      File.write!(Path.join(dir, "production.json"), manifest_body)
+    end
+
+    defp static_opts(ctx, overrides \\ []) do
+      test_pid = self()
+      root = site(ctx)
+
+      plug = fn
+        %{method: "GET", request_path: "/ota/" <> path} = conn ->
+          send(test_pid, {:static_get, path})
+
+          case File.read(Path.join(root, path)) do
+            {:ok, bytes} -> Plug.Conn.send_resp(conn, 200, bytes)
+            {:error, _} -> Plug.Conn.send_resp(conn, 404, "Not Found")
+          end
+
+        conn ->
+          send(test_pid, {:static_other, conn.method, conn.request_path})
+          Plug.Conn.send_resp(conn, 405, "")
+      end
+
+      opts(ctx, nil, %{}, overrides)
+      |> Keyword.update!(:client_opts, fn client ->
+        Keyword.merge(client,
+          endpoint: "https://example.github.io/ota/",
+          endpoint_type: :static,
+          req_options: [plug: plug]
+        )
+      end)
+    end
+
+    defp blobs(contents), do: Map.new(contents, &{sha(&1), &1})
+
+    test "installs from the published files with GETs only", ctx do
+      v1 = at(ctx, [{"MyApp.Home", "home 1"}], "2026-11-01T00:00:00Z")
+      activate!(ctx, at(ctx, [{"MyApp.Home", "home 0"}], "2026-10-31T00:00:00Z"))
+      publish!(ctx, v1, blobs(["home 1"]))
+
+      assert Installer.check(static_opts(ctx)) == {:ok, :installed}
+      assert Store.active_id(ctx.store) == Store.manifest_id(v1)
+      assert_received {:static_get, "manifests/com.example.app/production.json"}
+      assert_received {:static_get, "beam/" <> fetched}
+      assert fetched == sha("home 1")
+      refute_received {:static_other, _, _}
+
+      assert Installer.check(static_opts(ctx)) == {:ok, :current}
+    end
+
+    test "a stale copy served after the device saw a newer publish is refused, and nothing is downloaded",
+         ctx do
+      v1 = at(ctx, [{"MyApp.Home", "home 1"}], "2026-11-01T00:00:00Z")
+      v2 = at(ctx, [{"MyApp.Home", "home 2"}], "2026-11-02T00:00:00Z")
+      publish!(ctx, v1, blobs(["home 1"]))
+      assert Installer.check(static_opts(ctx)) == {:ok, :installed}
+      ctx = proven(ctx)
+
+      publish!(ctx, v2, blobs(["home 2"]))
+      assert Installer.check(static_opts(ctx)) == {:ok, :installed}
+      ctx = proven(ctx)
+
+      # A CDN edge still holding v1's file (v1's blobs are still published too).
+      publish!(ctx, v1, %{})
+      flush_static()
+
+      assert {:error, {:downgrade, %{newest_id: newest}}} = Installer.check(static_opts(ctx))
+      assert newest == Store.manifest_id(v2)
+      assert Store.active_id(ctx.store) == Store.manifest_id(v2)
+      assert_received {:static_get, "manifests/" <> _}
+      refute_received {:static_get, "beam/" <> _}
+    end
+
+    test "an older signed manifest replayed after a restart is refused", ctx do
+      v1 = at(ctx, [{"MyApp.Home", "home 1"}], "2026-11-01T00:00:00Z")
+      v2 = at(ctx, [{"MyApp.Home", "home 2"}], "2026-11-02T00:00:00Z")
+      publish!(ctx, v2, blobs(["home 2"]))
+      assert Installer.check(static_opts(ctx)) == {:ok, :installed}
+
+      # Whoever controls the host puts back an older publish (it verifies:
+      # signed manifests never expire), along with its blobs.
+      publish!(ctx, v1, blobs(["home 1"]))
+      relaunched = ctx |> restart() |> proven()
+
+      assert {:error, {:downgrade, _}} = Installer.check(static_opts(relaunched))
+      assert Store.active_id(relaunched.store) == Store.manifest_id(v2)
+    end
+
+    test "a manifest file that doesn't verify installs nothing and downloads nothing", ctx do
+      {_other_key, other_private} = TestPublisher.keypair()
+      forged = body(ctx, [{"MyApp.Home", "evil"}], other_private)
+      publish!(ctx, forged, blobs(["evil"]))
+
+      assert Installer.check(static_opts(ctx)) == {:error, :invalid_signature}
+      assert Store.active_id(ctx.store) == nil
+      refute_received {:static_get, "beam/" <> _}
+
+      # A tampered body (a signed manifest with a module swapped) likewise.
+      signed = JSON.decode!(body(ctx, [{"MyApp.Home", "home"}]))
+      tampered = put_in(signed, ["modules", "MyApp.Home"], "sha256:" <> sha("evil"))
+      publish!(ctx, JSON.encode!(tampered), %{})
+      assert Installer.check(static_opts(ctx)) == {:error, :invalid_signature}
+      assert Store.active_id(ctx.store) == nil
+    end
+
+    test "a blob whose bytes don't match its SHA is discarded and nothing is installed", ctx do
+      current = at(ctx, [{"MyApp.Home", "home 1"}], "2026-11-01T00:00:00Z")
+      activate!(ctx, current)
+      update = at(ctx, [{"MyApp.Home", "home 2"}], "2026-11-02T00:00:00Z")
+      publish!(ctx, update, %{sha("home 2") => "not home 2"})
+
+      assert {:error, {:prefetch_failed, bad, :sha_mismatch}} = Installer.check(static_opts(ctx))
+      assert bad == sha("home 2")
+      refute Store.has_blob?(ctx.store, sha("home 2"))
+      assert Store.active_id(ctx.store) == Store.manifest_id(current)
+    end
+
+    test "a crashing update is rolled back as before and the same file isn't reinstalled", ctx do
+      good = at(ctx, [{"MyApp.Home", "good"}], "2026-11-01T00:00:00Z")
+      bad = at(ctx, [{"MyApp.Home", "bad"}], "2026-11-02T00:00:00Z")
+      publish!(ctx, good, blobs(["good"]))
+      assert Installer.check(static_opts(ctx)) == {:ok, :installed}
+      {stable, {:ok, :armed}} = launch(ctx, %{"MyApp.Home" => sha("good")})
+      :ok = Watchdog.mark_stable(stable)
+
+      publish!(ctx, bad, blobs(["bad"]))
+      assert Installer.check(static_opts(ctx, watchdog: stable)) == {:ok, :installed}
+
+      # The probation launch dies before first idle; the next rolls back.
+      {_, {:ok, :armed}} = launch(ctx, %{"MyApp.Home" => sha("bad")})
+      {rolled, {:ok, :rolled_back}} = launch(ctx, %{})
+      assert Store.active_id(ctx.store) == Store.manifest_id(good)
+
+      # The host still serves the bad publish: refused, not reinstalled.
+      assert Installer.check(static_opts(ctx, watchdog: rolled)) == {:ok, :rejected}
+      assert Store.active_id(ctx.store) == Store.manifest_id(good)
+
+      fixed = at(ctx, [{"MyApp.Home", "fixed"}], "2026-11-03T00:00:00Z")
+      publish!(ctx, fixed, blobs(["fixed"]))
+      assert Installer.check(static_opts(ctx, watchdog: rolled)) == {:ok, :installed}
+    end
+
+    defp flush_static do
+      receive do
+        {:static_get, _} -> flush_static()
+      after
+        0 -> :ok
+      end
     end
   end
 end

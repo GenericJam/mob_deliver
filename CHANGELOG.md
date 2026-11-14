@@ -6,6 +6,41 @@ Format: [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Versioning: [S
 
 ---
 
+## [Unreleased]
+
+### Added
+- **Static endpoints** (`config :mob_deliver, endpoint_type: :static`):
+  the manifest is fetched with `GET <endpoint>/manifests/<app>/<channel>.json`
+  instead of `POST /manifest`, so the directory `mix mob_deliver.publish`
+  writes can be served as it is by GitHub Pages, a bucket or any file
+  server. Blobs, verification, install, rollback and the update gate are
+  unchanged. A stale copy from a CDN (or a replayed older publish) is
+  refused by the replay floor like any older manifest. Any other
+  `endpoint_type` (`false` included; only unset means `:server`) disables
+  the plugin at boot (`{:invalid_endpoint_type, value}`). See
+  `decisions/2026-11-13-static-endpoint.md`.
+
+### Security
+- **The replay floor fails closed.** A fetched manifest is no longer
+  installed, or used by `resolve/1`'s refresh, unless the update gate's
+  record of it (the floor) was persisted: `{:error, {:floor_not_persisted,
+  reason}}`, logged as an error, and every later check retries the write
+  first. Before, a failed write was only logged, and a newer manifest the
+  device had verified but not installed (failed prefetch, below
+  `min_app_version`, deferred, rolled back) was forgotten at the next
+  launch if `gate.json` was lost, corrupt or never written, letting an
+  older publish through as long as it was newer than the active one.
+- The record is kept in two copies; at start it is the newest manifest
+  that verifies among both copies, the old `gate.json` and the store's
+  active and previous slots, and a copy that doesn't hold it is rewritten.
+  A missing, corrupt or unverifiable copy is skipped (logged), never
+  treated as a floor, so it can't block updates.
+- **Floors are kept per app and channel** (`<root>/gate/<key>.json`,
+  `key` a hash of app and channel). A build on another channel no longer
+  discards the previous channel's floor, so production → beta →
+  production can't bring back an older production publish. Upgrading
+  devices keep the floor in their `gate.json`.
+
 ## [0.4.0] - 2026-10-15
 
 ### Security

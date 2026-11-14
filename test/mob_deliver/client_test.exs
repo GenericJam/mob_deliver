@@ -117,4 +117,74 @@ defmodule MobDeliver.ClientTest do
 
     refute_received :requested
   end
+
+  describe "endpoint_type: :static" do
+    setup %{opts: opts}, do: %{opts: Keyword.put(opts, :endpoint_type, :static)}
+
+    test "GETs the published manifest file and verifies it", %{opts: opts, private: private} do
+      body = TestPublisher.fields() |> TestPublisher.sign(private) |> JSON.encode!()
+
+      Req.Test.stub(Client, fn conn ->
+        {:ok, request_body, conn} = Plug.Conn.read_body(conn)
+
+        send(
+          self(),
+          {:request, conn.method, conn.request_path,
+           Plug.Conn.get_req_header(conn, "cache-control"), request_body}
+        )
+
+        Plug.Conn.send_resp(conn, 200, body)
+      end)
+
+      assert {:ok, %Manifest{app: "com.example.app", channel: "production"}, ^body} =
+               Client.fetch_manifest(opts)
+
+      assert_received {:request, "GET", "/deliver/manifests/com.example.app/production.json",
+                       ["no-cache"], ""}
+    end
+
+    test "app and channel are one path segment each", %{opts: opts, private: private} do
+      body =
+        %{"app" => "a/../b", "channel" => "beta 1"}
+        |> TestPublisher.fields()
+        |> TestPublisher.sign(private)
+        |> JSON.encode!()
+
+      Req.Test.stub(Client, fn conn ->
+        send(self(), {:path, conn.request_path})
+        Plug.Conn.send_resp(conn, 200, body)
+      end)
+
+      assert {:ok, %Manifest{}, ^body} =
+               Client.fetch_manifest(Keyword.merge(opts, app: "a/../b", channel: "beta 1"))
+
+      assert_received {:path, "/deliver/manifests/a%2F..%2Fb/beta%201.json"}
+    end
+
+    test "the file is verified like a server's answer: another key's manifest is refused",
+         %{opts: opts} do
+      {_other_key, other_private} = TestPublisher.keypair()
+      body = TestPublisher.fields() |> TestPublisher.sign(other_private) |> JSON.encode!()
+      Req.Test.stub(Client, &Plug.Conn.send_resp(&1, 200, body))
+
+      assert Client.fetch_manifest(opts) == {:error, :invalid_signature}
+    end
+
+    test "a missing file is an HTTP error", %{opts: opts} do
+      Req.Test.stub(Client, &Plug.Conn.send_resp(&1, 404, "Not Found"))
+      assert Client.fetch_manifest(opts) == {:error, {:http_status, 404}}
+    end
+  end
+
+  test "an unknown endpoint_type is an error, without a request", %{opts: opts} do
+    Req.Test.stub(Client, fn conn ->
+      send(self(), :requested)
+      Plug.Conn.send_resp(conn, 500, "")
+    end)
+
+    assert Client.fetch_manifest(Keyword.put(opts, :endpoint_type, "static")) ==
+             {:error, {:invalid_endpoint_type, "static"}}
+
+    refute_received :requested
+  end
 end
